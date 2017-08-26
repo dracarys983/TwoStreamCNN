@@ -1,3 +1,3 @@
-from loaders import DataLoader, DataGenerator, NTURGBD
+from loaders import NTURGBD
 
-__all__ = ['DataLoader', 'DataGenerator', 'NTURGBD']
+__all__ = ['NTURGBD']

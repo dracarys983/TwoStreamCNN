@@ -22,7 +22,7 @@ class NTURGBD(object):
         self.train_split_files = {'1': 'train1', '2': 'train2'}
         self.val_split_files = {'1': 'val1', '2': 'val2'}
         self.test_split_files = {'1': 'test1', '2': 'test2'}
-        f = open('/home/procastinator/ActRec-skeleton/faulty_skeletons', 'r')
+        f = open(os.path.join(split_dir, 'faulty_skeletons'), 'r')
         self.faulty_samples = f.readlines()
         f.close()
 

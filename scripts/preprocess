@@ -1,0 +1,19 @@
+#!/bin/bash
+
+# Preprocess the data
+if [ $# -lt 3 ]
+then
+  echo "Usage: ./preprocess <path_to_dataset> <path_to_split_files> <path_to_tfrecords_output_dir>"
+  exit 1
+fi
+
+if [ $# -eq 3 ]
+then
+  `python preprocess.py --dataset_dir=$1 --splits_dir=$2 --tfrecords_dir=$3`
+elif [ $# -eq 4 ]
+then
+  `python preprocess.py --dataset_dir=$1 --splits_dir=$2 --tfrecords_dir=$3 --split_num=$4`
+elif [ $# -eq 5 ]
+then
+  `python preprocess.py --dataset_dir=$1 --splits_dir=$2 --tfrecords_dir=$3 --split_num=$4 --is_training=$5`
+fi

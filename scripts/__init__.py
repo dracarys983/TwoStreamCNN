@@ -1,3 +1,3 @@
-import nturgbd_reader, preprocess
+import nturgbd, preprocess
 
-__all__ = ['nturgbd_reader', 'preprocess']
+__all__ = ['nturgbd', 'preprocess']

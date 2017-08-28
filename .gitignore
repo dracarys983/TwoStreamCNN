@@ -102,3 +102,6 @@ ENV/
 
 # Run script
 run.sh
+
+# checkpoints
+*.ckpt*

@@ -85,12 +85,15 @@ class Skeleton(object):
         self.num_joints = njoints
         if joints is None:
             self.joints = []
+        else:
+            self.joints = joints
         self.clip_edges = clip
         self.left_hand_confidence = lconfidence
         self.left_hand_state = lstate
         self.right_hand_confidence = rconfidence
         self.right_hand_state = rstate
         self.tracker = tracker
+        self._is_zero_skeleton = False
 
     def _get_skeleton_id(self):
         return self.skeletonID
@@ -181,11 +184,21 @@ class SkeletonVideo(object):
             xspread = np.max(X) - np.min(X); yspread = np.max(Y) - np.min(Y)
             return (yspread / xspread)
 
+        def _create_zero_skeleton():
+            joints = []
+            for i in range(25):
+                joint = Joint(0.0, 0.0, 0.0)
+                joints.append(joint)
+            skeleton = Skeleton(njoints=len(joints), joints=joints)
+            skeleton._is_zero_skeleton = True
+            return skeleton
+
         skeletons_0 = []; skeletons_1 = []
         for i in range(len(self.frames)):
             frame = self.frames[i]
             if frame._get_num_skeletons() == 1:
                 skeletons_0.append(frame._get_skeleton_objects()[0])
+                skeletons_1.append(_create_zero_skeleton())
             elif frame._get_num_skeletons() == 2:
                 skeletons_0.append(frame._get_skeleton_objects()[0])
                 skeletons_1.append(frame._get_skeleton_objects()[1])
@@ -201,8 +214,8 @@ class SkeletonVideo(object):
         dist_0 = _get_motion_for_skeletons(skeletons_0)
         dist_1 = _get_motion_for_skeletons(skeletons_1)
         if dist_0 > dist_1:
-            return skeletons_0
-        return skeletons_1
+            return skeletons_0, skeletons_1
+        return skeletons_1, skeletons_0
 
 
 # Reads the data for a complete frame set from the NTU RGB+D Action Recognition Dataset

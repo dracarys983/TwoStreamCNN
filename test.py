@@ -5,48 +5,13 @@ from tensorflow import app
 from tensorflow import flags
 from tensorflow import gfile
 from tensorflow import logging
+from tensorflow.python.framework import ops
+from tensorflow.python.framework import dtypes
 from utils import *
 
 import data, models
 
 FLAGS = flags.FLAGS
-
-if __name__ == "__main__":
-  # Dataset flags.
-  flags.DEFINE_string("eval_data_pattern", "", \
-                        "Regex for files for eval data")
-  flags.DEFINE_string("train_dir", "",
-                      "The directory to load the model files from. "
-                      "The tensorboard metrics files are also saved to this "
-                      "directory.")
-  flags.DEFINE_string("dataset", "NTURGBD", "Which dataset to load \
-                        for Action Recognition")
-  flags.DEFINE_string("dataset_dir", "", \
-                        "Path to base directory for video frames / skeletal data")
-  flags.DEFINE_string("splits_dir", "", \
-                        "Directory where train and test splits are stored")
-  flags.DEFINE_string("split_num", "1", "The train/test split to run the model on")
-
-
-  # Model flags.
-  flags.DEFINE_string(
-      "model", "NTURGBD_RNN",
-      "Which architecture to use for the model. Options include 'Logistic', "
-      "'SingleMixtureMoe', and 'TwoLayerSigmoid'. See aggregated_models.py and "
-      "frame_level_models.py for the model definitions.")
-  flags.DEFINE_integer("batch_size", 64,
-                       "How many examples to process per batch.")
-  flags.DEFINE_integer("num_epochs", 1,
-                       "How many examples to process per batch.")
-  flags.DEFINE_string("label_loss", "CrossEntropyLoss",
-                      "Loss computed on validation data")
-
-  # Other flags.
-  flags.DEFINE_integer("num_readers", 1,
-                       "How many threads to use for reading input files.")
-  flags.DEFINE_boolean("run_once", True, "Whether to run eval only once.")
-  flags.DEFINE_integer("top_k", 20, "How many predictions to output per video.")
-
 
 def find_class_by_name(name, modules):
   """Searches the provided modules for the named class and returns it."""
@@ -55,7 +20,6 @@ def find_class_by_name(name, modules):
 
 
 def get_input_evaluation_tensors(reader,
-                                 data_pattern,
                                  batch_size=1024,
                                  num_readers=1):
   """Creates the section of the graph which reads the evaluation data.
@@ -76,23 +40,28 @@ def get_input_evaluation_tensors(reader,
   """
   logging.info("Using batch size of " + str(batch_size) + " for evaluation.")
   with tf.name_scope("eval_input"):
-    files = reader._read_filelist(split=FLAGS.split_num, train=False, val=False)
+    files, labels = reader._read_filelist(split=reader.present_split, train=False)
     if not files:
       raise IOError("Unable to find the evaluation files.")
     logging.info("number of evaluation files: " + str(len(files)))
-    filename_queue = tf.train.string_input_producer(
-        files, shuffle=False, num_epochs=1)
-    eval_data, label = reader._read_samples(filename_queue)
-    label = label - 1
-    return tf.train.batch(
-        [eval_data, label],
-        batch_size=batch_size,
-        capacity=5 * batch_size,
-        allow_smaller_final_batch=True)
+    files = ops.convert_to_tensor(files, dtypes.string)
+    labels = ops.convert_to_tensor(labels, dtypes.int64)
+
+    input_queue = tf.train.slice_input_producer(
+                        [files, labels],
+                        num_epochs = 1,
+                        shuffle = False)
+    image, label = reader._read_samples(input_queue)
+    image = tf.image.resize_images(image, (299, 299))
+
+    test_image_loader, test_label_loader = tf.train.batch(
+        [image, label],
+        batch_size = batch_size,
+        capacity = 5 * batch_size)
+    return test_image_loader, test_label_loader
 
 def build_graph(reader,
                 model,
-                eval_data_pattern,
                 label_loss_fn,
                 batch_size=1024,
                 num_readers=1):
@@ -112,7 +81,6 @@ def build_graph(reader,
   global_step = tf.Variable(0, trainable=False, name="global_step")
   model_input, labels_batch = get_input_evaluation_tensors(  # pylint: disable=g-line-too-long
       reader,
-      eval_data_pattern,
       batch_size=batch_size,
       num_readers=num_readers)
   tf.summary.histogram("model_input", model_input)
@@ -127,6 +95,8 @@ def build_graph(reader,
       label_loss = result["loss"]
   else:
       label_loss = label_loss_fn.calculate_loss(predictions, labels_batch)
+  restore_vars = result['restore_vars']
+  train_vars = result['train_vars']
 
   tf.add_to_collection("global_step", global_step)
   tf.add_to_collection("loss", label_loss)
@@ -135,10 +105,11 @@ def build_graph(reader,
   tf.add_to_collection("labels", tf.cast(labels_batch, tf.int64))
   tf.add_to_collection("summary_op", tf.summary.merge_all())
 
+  return train_vars, restore_vars
 
 def evaluation_loop(prediction_batch, label_batch, loss,
-                    summary_op, saver, summary_writer, evl_metrics,
-                    last_global_step_val):
+                    summary_op, saver, summary_writer, train_dir,
+                    evl_metrics, last_global_step_val):
   """Run the evaluation loop once.
 
   Args:
@@ -158,7 +129,7 @@ def evaluation_loop(prediction_batch, label_batch, loss,
 
   global_step_val = -1
   with tf.Session() as sess:
-    latest_checkpoint = tf.train.latest_checkpoint(FLAGS.train_dir)
+    latest_checkpoint = tf.train.latest_checkpoint(train_dir)
     if latest_checkpoint:
       logging.info("Loading checkpoint for eval: " + latest_checkpoint)
       # Restores from checkpoint
@@ -235,26 +206,35 @@ def evaluation_loop(prediction_batch, label_batch, loss,
     coord.request_stop()
     coord.join(threads, stop_grace_period_secs=10)
 
-    return global_step_val
+    return global_step_val, epoch_info_dict['avg_hit_at_one']
 
 
-def evaluate():
+def evaluate(dataset,
+             model,
+             train_dir,
+             dataset_dir,
+             splits_dir,
+             num_epochs,
+             batch_size,
+             split_num,
+             label_loss='CrossEntropyLoss',
+             run_once=True):
   tf.set_random_seed(0)  # for reproducibility
   with tf.Graph().as_default():
-    reader = getattr(data, FLAGS.dataset)(FLAGS.dataset_dir, FLAGS.splits_dir,
-                    FLAGS.num_epochs, FLAGS.batch_size, FLAGS.split_num)
+    reader = getattr(data, dataset)(dataset_dir, splits_dir,
+                    num_epochs, batch_size, split_num)
 
-    model = find_class_by_name(FLAGS.model,
+    model = find_class_by_name(model,
                             [models])()
-    label_loss_fn = find_class_by_name(FLAGS.label_loss, [losses])()
+    label_loss_fn = find_class_by_name(label_loss, [losses])()
 
-    build_graph(
-        reader=reader,
-        model=model,
-        eval_data_pattern=FLAGS.eval_data_pattern,
-        label_loss_fn=label_loss_fn,
-        num_readers=FLAGS.num_readers,
-        batch_size=FLAGS.batch_size)
+    train_vars, restore_vars = \
+        build_graph(
+            reader=reader,
+            model=model,
+            label_loss_fn=label_loss_fn,
+            num_readers=1,
+            batch_size=batch_size)
     logging.info("built evaluation graph")
     prediction_batch = tf.get_collection("predictions")[0]
     label_batch = tf.get_collection("labels")[0]
@@ -262,26 +242,32 @@ def evaluate():
     summary_op = tf.get_collection("summary_op")[0]
 
     saver = tf.train.Saver(tf.global_variables())
-    summary_writer = tf.summary.FileWriter(
-        FLAGS.train_dir, graph=tf.get_default_graph())
+    summary_writer = tf.summary.FileWriter(train_dir, graph=tf.get_default_graph())
 
-    evl_metrics = eval_util.EvaluationMetrics(reader.num_classes, FLAGS.top_k)
+    evl_metrics = eval_util.EvaluationMetrics(reader.num_classes, 20)
 
     last_global_step_val = -1
     while True:
-      last_global_step_val = evaluation_loop(prediction_batch,
+      last_global_step_val, h1 = evaluation_loop(prediction_batch,
                                              label_batch, loss, summary_op,
-                                             saver, summary_writer, evl_metrics,
-                                             last_global_step_val)
-      if FLAGS.run_once:
+                                             saver, summary_writer, train_dir,
+                                             evl_metrics, last_global_step_val)
+      if run_once:
         break
+    return h1
 
-
-def main(unused_argv):
-  logging.set_verbosity(tf.logging.INFO)
-  print("tensorflow version: %s" % tf.__version__)
-  evaluate()
-
-
-if __name__ == "__main__":
-  app.run()
+'''
+if __name__=='__main__':
+    logging.set_verbosity(tf.logging.INFO)
+    dataset = 'HybridModelReader'
+    model = 'Hybrid'
+    train_dir = '/home/procastinator/nturgbd_hybrid'
+    dataset_dir = '/home/procastinator/nturgb+d_images'
+    splits_dir = '/home/procastinator/NTU_data'
+    checkpoint_file = ''
+    num_epochs = 1
+    batch_size = 32
+    split_num = '1'
+    out = evaluate(dataset, model, train_dir, dataset_dir, splits_dir, num_epochs, batch_size, split_num)
+    print out
+'''

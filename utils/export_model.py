@@ -63,23 +63,27 @@ class ModelExporter(object):
         return inputs, outputs
 
     def build_prediction_graph(self, split):
-        files = self.reader._read_filelist(split=split)
+        files, labels = self.reader._read_filelist(split=split)
 
-        input_queue = tf.train.string_input_producer(
-                            files,
+        files = ops.convert_to_tensor(files, dtypes.string)
+        labels = ops.convert_to_tensor(labels, dtypes.int64)
+
+        input_queue = tf.train.slice_input_producer(
+                            [files, labels],
                             num_epochs = self.reader.num_epochs,
                             shuffle = True)
-        seq, label = self.reader._read_samples(input_queue)
+        image, label = self.reader._read_samples(input_queue)
+        image = tf.image.resize_images(image, (299, 299))
 
-        seq_loader, label_loader = tf.train.shuffle_batch(
-                [seq, label],
+        image_loader, label_loader = tf.train.shuffle_batch(
+                [image, label],
                 batch_size = self.reader.batch_size,
                 capacity = 5 * self.reader.batch_size,
                 min_after_dequeue = self.reader.batch_size)
 
         #with tf.variable_scope("tower"):
         result = self.model.create_model(
-          seq_loader,
+          image_loader,
           self.reader.num_classes,
           label_loader,
           is_training=False)

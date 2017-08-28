@@ -1,3 +1,3 @@
-from loaders import NTURGBD
+from loaders import NTURGBD, HybridModelReader
 
-__all__ = ['NTURGBD']
+__all__ = ['NTURGBD', 'HybridModelReader']

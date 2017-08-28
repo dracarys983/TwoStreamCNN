@@ -1,3 +1,3 @@
-from models import NTURGBD_RNN
+from models import NTURGBD_RNN, Hybrid
 
-__all__ = ['NTURGBD_RNN']
+__all__ = ['NTURGBD_RNN', 'Hybrid']

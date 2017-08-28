@@ -1,4 +1,4 @@
-import os, argparse, sys, time
+import os, argparse, shutil, time, glob
 
 import tensorflow as tf
 from tensorflow import app
@@ -14,7 +14,7 @@ from tensorflow.contrib.tensorboard.plugins import projector
 
 import data, models
 from utils import *
-from validate import *
+from test import *
 
 slim = tf.contrib.slim
 layers = tf.contrib.layers
@@ -25,32 +25,32 @@ FLAGS = flags.FLAGS
 if __name__ == '__main__':
     flags.DEFINE_string("train_dir", "",
                         "Directory to save the model files in")
-    flags.DEFINE_string("dataset", "NTURGBD", "Which dataset to load \
+    flags.DEFINE_string("dataset", "HybridModelReader", "Which dataset to load \
                         for Action Recognition")
     flags.DEFINE_string("dataset_dir", "", \
                         "Path to base directory for video frames (rgb / rgb+flow)")
     flags.DEFINE_string("splits_dir", "", \
                         "Directory where train and test splits are stored")
-    flags.DEFINE_string("model", "NTURGBD_RNN", "Which architecture to use for the model")
+    flags.DEFINE_string("checkpoint_file", "", \
+                        "Checkpoint file to restore variables")
+    flags.DEFINE_string("model", "Hybrid", "Which architecture to use for the model")
     flags.DEFINE_string("label_loss", "CrossEntropyLoss", "Which loss function to use \
                             for training the model")
     flags.DEFINE_string("optimizer", "AdamOptimizer", "What optimizer class to use")
     flags.DEFINE_string("split_num", "1", "The train/test split to run the model on")
 
-    flags.DEFINE_integer("batch_size", 64, "Number of examples to process per batch \
+    flags.DEFINE_integer("batch_size", 36, "Number of examples to process per batch \
                             for training")
-    flags.DEFINE_integer("validation_steps", 626, "Number of examples to process per batch \
-                            for training")
-    flags.DEFINE_integer("num_epochs", 500, "How many passes to make over the dataset \
+    flags.DEFINE_integer("num_epochs", 50, "How many passes to make over the dataset \
                             before halting training")
     flags.DEFINE_integer("export_model_steps", 10000, "The period, in number of steps, \
                             with which the model is exported for batch prediction")
     flags.DEFINE_integer("max_steps", None, "The maximum number of iterations of the \
                             training loop")
-    flags.DEFINE_integer("learning_rate_decay_examples", 400910, "Multiply current learning \
+    flags.DEFINE_integer("learning_rate_decay_examples", 1202730, "Multiply current learning \
                             rate by learning_rate_decay every learning_rate_decay_examples")
 
-    flags.DEFINE_float("base_learning_rate", 0.0001, "Which learning rate to start with")
+    flags.DEFINE_float("base_learning_rate", 0.001, "Which learning rate to start with")
     flags.DEFINE_float("learning_rate_decay", 0.9, "Learning rate decay factor to be \
                             applied every learning_rate_decay_examples")
     flags.DEFINE_float("clip_gradient_norm", 1.0, "Norm to clip gradients to")
@@ -69,25 +69,28 @@ def get_input_data_tensors(reader,
                            num_epochs=None,
                            num_readers=1):
     logging.info("Using batch size of " + str(batch_size) + " for training.")
-    files = reader._read_filelist(split=reader.present_split)
+    files, labels = reader._read_filelist(split=reader.present_split)
 
     with tf.name_scope("train_input"):
         logging.info("Number of training files: %s", str(len(files)))
 
-        input_queue = tf.train.string_input_producer(
-                            files,
+        files = ops.convert_to_tensor(files, dtypes.string)
+        labels = ops.convert_to_tensor(labels, dtypes.int64)
+
+        input_queue = tf.train.slice_input_producer(
+                            [files, labels],
                             num_epochs = num_epochs,
                             shuffle = True)
-        seq, label = reader._read_samples(input_queue)
-        label = label - 1
+        image, label = reader._read_samples(input_queue)
+        image = tf.image.resize_images(image, (299, 299))
 
-        train_seq_loader, train_label_loader = tf.train.shuffle_batch(
-            [seq, label],
+        train_image_loader, train_label_loader = tf.train.shuffle_batch(
+            [image, label],
             batch_size = batch_size,
             capacity = 5 * batch_size,
             min_after_dequeue = batch_size)
 
-    return train_seq_loader, train_label_loader
+    return train_image_loader, train_label_loader
 
 def build_graph(reader,
                 model,
@@ -136,8 +139,13 @@ def build_graph(reader,
         reg_loss = result['reg_loss']
         tf.summary.scalar("reg_loss", reg_loss)
         final_loss += (reg_loss * regularization_penalty)
+    if "train_vars" in result.keys():
+        train_vars = result['train_vars']
+    else:
+        train_vars = tf.trainable_variables()
+    restore_vars = result['restore_vars']
 
-    train_op = optimizer.minimize(final_loss, global_step=global_step)
+    train_op = optimizer.minimize(final_loss, global_step=global_step, var_list=train_vars)
 
     tf.add_to_collection("global_step", global_step)
     tf.add_to_collection("loss", final_loss)
@@ -145,6 +153,8 @@ def build_graph(reader,
     tf.add_to_collection("input_batch", images_batch)
     tf.add_to_collection("labels", labels_batch)
     tf.add_to_collection("train_op", train_op)
+
+    return train_vars, restore_vars
 
 def find_class_by_name(name, modules):
     modules = [getattr(module, name, None) for module in modules]
@@ -233,21 +243,24 @@ class Trainer(object):
         label_loss_fn = find_class_by_name(FLAGS.label_loss, [losses])()
         optimizer_class = find_class_by_name(FLAGS.optimizer, [tf.train])
 
-        build_graph(reader=reader,
-                     model=model,
-                     optimizer_class=optimizer_class,
-                     clip_gradient_norm=FLAGS.clip_gradient_norm,
-                     split_num=FLAGS.split_num,
-                     label_loss_fn=label_loss_fn,
-                     base_learning_rate=FLAGS.base_learning_rate,
-                     learning_rate_decay=FLAGS.learning_rate_decay,
-                     learning_rate_decay_examples=FLAGS.learning_rate_decay_examples,
-                     regularization_penalty=FLAGS.regularization_penalty,
-                     num_readers=1,
-                     batch_size=FLAGS.batch_size,
-                     num_epochs=FLAGS.num_epochs)
+        train_vars, restore_vars = \
+            build_graph(reader=reader,
+                         model=model,
+                         optimizer_class=optimizer_class,
+                         clip_gradient_norm=FLAGS.clip_gradient_norm,
+                         split_num=FLAGS.split_num,
+                         label_loss_fn=label_loss_fn,
+                         base_learning_rate=FLAGS.base_learning_rate,
+                         learning_rate_decay=FLAGS.learning_rate_decay,
+                         learning_rate_decay_examples=FLAGS.learning_rate_decay_examples,
+                         regularization_penalty=FLAGS.regularization_penalty,
+                         num_readers=1,
+                         batch_size=FLAGS.batch_size,
+                         num_epochs=FLAGS.num_epochs)
 
-        return tf.train.Saver()
+        saver = tf.train.Saver(var_list=restore_vars)
+
+        return saver, tf.train.Saver(max_to_keep=2)
 
     def export_model(self, global_step_val, saver, save_path, session):
 
@@ -280,7 +293,7 @@ class Trainer(object):
 
             with tf.device(device_fn):
                 if not meta_filename:
-                    saver = self.build_model(self.model, self.reader)
+                    saver_for_restore, saver = self.build_model(self.model, self.reader)
 
             global_step = tf.get_collection("global_step")[0]
             loss = tf.get_collection("loss")[0]
@@ -295,11 +308,22 @@ class Trainer(object):
             init_op=init_op,
             is_chief=self.is_master,
             global_step=global_step,
-            save_model_secs=15 * 60,
+            save_model_secs=10 * 60,
             save_summaries_secs=120,
             saver=saver)
 
-        global_h1 = -1
+        with tf.Session(graph=graph) as sess:
+            if not meta_filename:
+                saver_for_restore.restore(sess, FLAGS.checkpoint_file)
+
+        if os.path.exists('best_checkpoint_path'):
+            with open('best_checkpoint_path', 'r') as f:
+                lines = f.readlines()
+                line = lines[-1].strip().split(',')[1].strip()
+                global_h1 = float(line)
+        else:
+            global_h1 = -1
+        validation_steps = 37585
         logging.info("%s: Starting managed session.", task_as_string(self.task))
         with sv.managed_session(config=self.config) as sess:
             try:
@@ -337,6 +361,7 @@ class Trainer(object):
                                               examples_per_second), global_step_val)
                         sv.summary_writer.flush()
 
+                        '''
                         # Export model every x steps
                         time_to_export = ((self.last_model_export_step == 0) or
                             (global_step_val - self.last_model_export_step
@@ -345,19 +370,29 @@ class Trainer(object):
                         if self.is_master and time_to_export:
                             self.export_model(global_step_val, sv.saver, sv.save_path, sess)
                             self.last_model_export_step = global_step_val
+                        '''
+
                     else:
                         logging.info("training step " + str(global_step_val) + " | Loss: " +
                             ("%.2f" % loss_val) + " Examples/sec: " + ("%.2f" % examples_per_second))
 
-                    '''
-                    if global_step_val and not (global_step_val % FLAGS.validation_steps):
-                        path = sv.save_path+"-%d" % (global_step_val)
-                        sv.saver.save(sess, path)
-                        avg_h1 = evaluate(FLAGS.dataset, FLAGS.model, FLAGS.dataset_dir, FLAGS.splits_dir,
-                                            1, FLAGS.batch_size, FLAGS.split_num)
+                    if global_step_val and not (global_step_val % validation_steps):
+                        f = open('best_checkpoint_path', 'a+')
+                        if not os.path.exists('best_checkpoint'):
+                            os.makedirs('best_checkpoint')
+                        avg_h1 = evaluate(FLAGS.dataset, FLAGS.model, FLAGS.train_dir,
+                                        FLAGS.dataset_dir, FLAGS.splits_dir, 1, FLAGS.batch_size, FLAGS.split_num)
                         if avg_h1 > global_h1:
                             global_h1 = avg_h1
-                    '''
+                            latest_checkpoint = tf.train.latest_checkpoint(FLAGS.train_dir)
+                            f.write("%s, %f" % (latest_checkpoint, global_h1))
+                            del_files = glob.glob('best_checkpoint/*')
+                            for d in del_files:
+                                os.remove(d)
+                            files = glob.glob(latest_checkpoint + '.*')
+                            for fn in files:
+                                shutil.copy(fn, 'best_checkpoint')
+                        f.close()
 
             except tf.errors.OutOfRangeError:
                 logging.info("%s: Done training -- epoch limit reached.",
@@ -395,14 +430,6 @@ def main(unused_argv):
     else:
         raise ValueError("%s: Invalid task_type: %s." %
                      (task_as_string(task), task.type))
-
-    '''
-    var_list = []
-    for var in t_vars:
-        if not ("Logits/Logits" in var.name
-            or "AuxLogits/Logits" in var.name):
-            var_list.append(var)
-    '''
 
 if __name__ == '__main__':
     app.run()

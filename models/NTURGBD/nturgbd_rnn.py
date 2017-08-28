@@ -10,6 +10,8 @@ framework = tf.contrib.framework
 rnn = tf.contrib.rnn
 layers = tf.contrib.layers
 
+import bnlstm
+
 from tensorflow.python.ops import variable_scope as vs
 
 from tensorflow.contrib.rnn import RNNCell
@@ -71,22 +73,25 @@ class SkeletonHRNNet(object):
 
         self._num_layers_spatial = 3
 
-    def create_model(self, inputs, num_classes, labels, spatial=True, **unused_params):
+    def create_model(self, inputs, num_classes, labels, is_training=True, **unused_params):
         outputs = {}
 
+        is_training = tf.constant(is_training, dtype=tf.bool)
         with tf.variable_scope('spatial'):
             cells = []
-            num_hidden = [1024, 512, 128]
+            num_hidden = [256, 256, 256]
             for i in range(self._num_layers_spatial):
-                cell = rnn.LSTMCell(num_hidden[i])
-                cell = rnn.DropoutWrapper(cell, output_keep_prob=0.5)
+                cell = bnlstm.BNLSTMCell(num_hidden[i], training=is_training)
+                cell = rnn.DropoutWrapper(cell, input_keep_prob=0.5, output_keep_prob=0.5)
                 cells.append(cell)
             spatial = rnn.MultiRNNCell(cells)
             output, new_states = tf.nn.dynamic_rnn(spatial, inputs,
                 dtype=tf.float32, sequence_length=length(inputs))
 
         last = last_relevant(output, length(output))
-        logits = layers.fully_connected(last, num_classes, activation_fn=None)
+        fc4 = layers.fully_connected(last, 128, activation_fn=tf.nn.relu)
+        fc5 = layers.fully_connected(fc4, 64, activation_fn=tf.nn.relu)
+        logits = layers.fully_connected(fc5, num_classes, activation_fn=None)
 
         cross_entropy = tf.nn.sparse_softmax_cross_entropy_with_logits(
                 labels=labels, logits=logits, name='xentropy')

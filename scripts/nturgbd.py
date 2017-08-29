@@ -1,9 +1,9 @@
 import os
 import numpy as np
 from PIL import Image
-import matplotlib.pyplot as plt
-from mpl_toolkits.mplot3d import Axes3D
-from sklearn import preprocessing
+#import matplotlib.pyplot as plt
+#from mpl_toolkits.mplot3d import Axes3D
+#from sklearn import preprocessing
 
 import tensorflow as tf
 from tensorflow import logging

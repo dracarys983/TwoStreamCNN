@@ -33,6 +33,6 @@ class Hybrid(object):
         outputs, tvars = hybrid.get_bn_lstm_feats(inputs, is_training)
         return outputs, tvars
 
-    def create_logits_model(self, inputs, is_training=True, **unused_params):
-        outputs, tvars = hybrid.get_classifier_logits(inputs, is_training)
+    def create_logits_model(self, inputs, num_classes, scope="logits", is_training=True, **unused_params):
+        outputs, tvars = hybrid.get_classifier_logits(inputs, num_classes, lscope=scope, is_training=is_training)
         return outputs, tvars

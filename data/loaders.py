@@ -87,7 +87,7 @@ class HybridModelReader(object):
         file_list = tf.split(input_queue[0], [1, 1, 1, 1, 1, 1])
         images = []
         for fn in file_list:
-            file_content = tf.read_file(fn[0][0])
+            file_content = tf.read_file(fn[0])
             image = tf.image.decode_jpeg(file_content, channels=3)
             image = tf.image.resize_images(image, (299, 299))
             image = tf.cast(image, tf.float32)

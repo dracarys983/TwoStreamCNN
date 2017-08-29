@@ -39,7 +39,7 @@ if __name__ == '__main__':
     flags.DEFINE_string("optimizer", "AdamOptimizer", "What optimizer class to use")
     flags.DEFINE_string("split_num", "1", "The train/test split to run the model on")
 
-    flags.DEFINE_integer("batch_size", 96, "Number of examples to process per batch \
+    flags.DEFINE_integer("batch_size", 32, "Number of examples to process per batch \
                             for training")
     flags.DEFINE_integer("num_epochs", 50, "How many passes to make over the dataset \
                             before halting training")
@@ -47,7 +47,7 @@ if __name__ == '__main__':
                             with which the model is exported for batch prediction")
     flags.DEFINE_integer("max_steps", None, "The maximum number of iterations of the \
                             training loop")
-    flags.DEFINE_integer("learning_rate_decay_examples", 1202730, "Multiply current learning \
+    flags.DEFINE_integer("learning_rate_decay_examples", 80182, "Multiply current learning \
                             rate by learning_rate_decay every learning_rate_decay_examples")
 
     flags.DEFINE_float("base_learning_rate", 0.0001, "Which learning rate to start with")
@@ -136,43 +136,44 @@ def build_graph(reader,
     lstm_feat_batch = tf.placeholder(tf.float32, (None, 17, 17, 1024))
     lstm_output, train_v2 = model.create_lstm_model(
         lstm_feat_batch)
-    # (17 * 512) = 8074
-    aux_fc_batch = tf.placeholder(tf.float32, (None, 8074))
-    # 512
+    # (3 * 512)
     lstm_fc_batch = tf.placeholder(tf.float32, (None, 1536))
-    logits_aux, train_v3 = model.create_logits_model(
-        aux_fc_batch)
     logits_lstm, train_v4 = model.create_logits_model(
-        lstm_fc_batch)
+        lstm_fc_batch, 60, scope="lstmlogs")
+    # (17 * 512 * 2) = 17408
+    aux_fc_batch = tf.placeholder(tf.float32, (None, 17408))
+    logits_aux, train_v3 = model.create_logits_model(
+        aux_fc_batch, 60, scope="auxlogs")
 
     # 60
-    final_logits = tf.placeholder(tf.float32, (None, 60))
-    loss = tf.reduce_mean(tf.nn.sparse_softmax_cross_entropy_with_logits(logits=final_logits,
-            labels=labels_batch))
+    loss = (0.4 * tf.reduce_mean(
+        tf.nn.sparse_softmax_cross_entropy_with_logits(logits=logits_aux, labels=labels_batch))
+        + 0.6 * tf.reduce_mean(
+            tf.nn.sparse_softmax_cross_entropy_with_logits(logits=logits_lstm, labels=labels_batch)))
 
-    predictions = final_logits
-    tf.summary.histogram("model_activations", predictions)
-    tf.summary.scalar("loss", loss)
+    predictions = tf.placeholder(tf.float32, (None, 60))
 
     train_vars = train_v0
-    train_vars.extend(train_v1).extend(train_v2).extend(train_v3).extend(train_v4)
+    train_vars.extend(train_v1)
+    train_vars.extend(train_v2)
+    train_vars.extend(train_v3)
+    train_vars.extend(train_v4)
     train_op = optimizer.minimize(loss, global_step=global_step, var_list=train_vars)
 
     tf.add_to_collection("global_step", global_step)
-    tf.add_to_collection("loss", final_loss)
+    tf.add_to_collection("loss", loss)
     tf.add_to_collection("feature", feature)
-    tf.add_to_collection("aux_feat_batch", aux_batch)
+    tf.add_to_collection("aux_feat_batch", aux_feat_batch)
     tf.add_to_collection("aux_output", aux_output)
-    tf.add_to_collection("lstm_feat_batch", aux_batch)
+    tf.add_to_collection("lstm_feat_batch", lstm_feat_batch)
     tf.add_to_collection("lstm_output", lstm_output)
-    tf.add_to_collection("aux_fc_batch", aux_batch)
+    tf.add_to_collection("aux_fc_batch", aux_fc_batch)
     tf.add_to_collection("logits_aux", logits_aux)
-    tf.add_to_collection("lstm_fc_batch", aux_batch)
+    tf.add_to_collection("lstm_fc_batch", lstm_fc_batch)
     tf.add_to_collection("logits_lstm", logits_lstm)
-    tf.add_to_collection("final_logits", final_logits)
     tf.add_to_collection("input_batch", images_batch)
     tf.add_to_collection("labels", labels_batch)
-    tf.add_to_collection("predictions", final_logits)
+    tf.add_to_collection("predictions", predictions)
     tf.add_to_collection("train_op", train_op)
     tf.add_to_collection("images_loader", images_loader)
     tf.add_to_collection("labels_loader", labels_loader)
@@ -188,7 +189,7 @@ def task_as_string(task):
 
 class Trainer(object):
     def __init__(self, cluster, task, train_dir, model, reader,
-                model_exporter, log_device_placement=True, max_steps=None,
+                log_device_placement=True, max_steps=None,
                 export_model_steps=1000):
 
         self.cluster = cluster
@@ -199,7 +200,7 @@ class Trainer(object):
             allow_soft_placement=True, log_device_placement=log_device_placement)
         self.model = model
         self.reader = reader
-        self.model_exporter = model_exporter
+        #self.model_exporter = model_exporter
         self.max_steps = max_steps
         self.max_steps_reached = False
         self.export_model_steps = export_model_steps
@@ -333,7 +334,6 @@ class Trainer(object):
             logits_aux = tf.get_collection("logits_aux")[0]
             lstm_fc_batch = tf.get_collection("lstm_fc_batch")[0]
             logits_lstm = tf.get_collection("logits_lstm")[0]
-            final_logits = tf.get_collection("final_logits")[0]
             inputs_loader = tf.get_collection("images_loader")[0]
             labels_loader = tf.get_collection("labels_loader")[0]
             init_op = tf.group(tf.global_variables_initializer(), tf.local_variables_initializer())
@@ -365,41 +365,55 @@ class Trainer(object):
             try:
                 logging.info("%s: Entering training loop.", task_as_string(self.task))
                 while (not sv.should_stop()) and (not self.max_steps_reached):
+                    #logging.info("%s, Entered", task_as_string(self.task))
                     batch_start_time = time.time()
                     input_batch, label_batch = sess.run([inputs_loader, labels_loader])
+                    #logging.info("%s, Doesn't break before", task_as_string(self.task))
 
+                    # (batch_size, 6, 299, 299, 3)
                     input_batch = np.transpose(input_batch, [1, 0, 2, 3, 4])
+                    # list of (batch_size, 299,  299, 3) of size 6
                     six_inputs = np.split(input_batch, 6)
+                    six_inputs = [np.reshape(x, [-1, 299, 299, 3]) for x in six_inputs]
 
                     features = []
                     for inp in six_inputs:
                         feat_vec = sess.run(feature, feed_dict={inputs: inp})
                         features.append(feat_vec)
-                    feats_for_aux = [np.concat([features[i], features[i+2],
+                    # Each entry has size (batch_size, 17, 17, 1536)
+                    feats_for_aux = [np.concatenate([features[i], features[i+2],
                         features[i+4]], axis=3) for i in range(2)]
-                    feats_for_lstm = [np.concat([features[i], features[i+1]],
+                    # Each entry has size (batch_size, 17, 17, 1024)
+                    feats_for_lstm = [np.concatenate([features[i], features[i+1]],
                         axis=3) for i in range(0, 5, 2)]
 
+                    # Each output (2) has size (batch_size, 8704)
                     aux_outputs = []
                     for feat in feats_for_aux:
                         out = sess.run(aux_output, feed_dict={aux_feat_batch: feat})
                         aux_outputs.append(out)
+                    # Each output (3) has size (batch_size, 512)
                     lstm_outputs = []
                     for feat in feats_for_lstm:
                         out = sess.run(lstm_output, feed_dict={lstm_feat_batch: feat})
                         lstm_outputs.append(out)
-                    lstm_fc = np.concat(lstm_outputs, axis=1)
 
-                    aux_fc_outputs = []
-                    for feat in aux_outputs:
-                        out = sess.run(logits_aux, feed_dict={aux_fc_batch: feat})
-                        aux_fc_outputs.append(out)
-                    lstm_fc_output = sess.run(logits_lstm, feed_dict={lstm_fc_batch: lstm_fc})
-                    aux_fc_output = (0.5 * aux_fc_outputs[0]) + (0.5 * aux_fc_outputs[1])
+                    # lstm_fc: (batch_size, 1536)
+                    # aux_fc: (batch_size, 17408)
+                    lstm_fc = np.concatenate(lstm_outputs, axis=1)
+                    aux_fc = np.concatenate(aux_outputs, axis=1)
 
-                    final_fc_out = (0.7 * lstm_fc_output) + (0.3 * aux_fc_output)
-                    _, global_step_val, predictions_val, labels_val, loss = sess.run([train_op,
-                        global_step, predictions, labels, loss], feed_dict={final_logits: final_fc_out, labels: label_batch})
+                    #logging.info("%s, %s", lstm_fc.shape, aux_fc.shape)
+
+                    lstm_logits, aux_logits = sess.run(
+                            [logits_lstm, logits_aux],
+                            feed_dict={aux_fc_batch: aux_fc, lstm_fc_batch: lstm_fc})
+
+                    final_logits = (0.4 * aux_logits) + (0.6 * lstm_logits)
+
+                    _, global_step_val, predictions_val, labels_val, loss_val = sess.run([train_op,
+                        global_step, predictions, labels, loss], feed_dict={labels: label_batch,
+                            predictions: final_logits, aux_fc_batch: aux_fc, lstm_fc_batch: lstm_fc})
 
                     seconds_per_batch = time.time() - batch_start_time
                     examples_per_second = labels_val.shape[0] / seconds_per_batch # TODO
@@ -474,12 +488,12 @@ def main(unused_argv):
         reader = getattr(data, FLAGS.dataset)(FLAGS.dataset_dir, FLAGS.splits_dir,
                 FLAGS.num_epochs, FLAGS.batch_size, FLAGS.split_num)
 
-        model_exporter = export_model.ModelExporter(
-                model=model,
-                reader=reader)
+        #model_exporter = export_model.ModelExporter(
+        #        model=model,
+        #        reader=reader)
 
         Trainer(cluster, task, FLAGS.train_dir, model, reader,
-                model_exporter, FLAGS.log_device_placement, FLAGS.max_steps,
+                FLAGS.log_device_placement, FLAGS.max_steps,
                 FLAGS.export_model_steps).run(start_new_model=FLAGS.start_new_model)
 
     elif task.type == "ps":

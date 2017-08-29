@@ -76,17 +76,25 @@ class HybridModelReader(object):
             label = long(d.split('.')[0][-3:])
             dpath = os.path.join(self.dataset_dir, dirname, d)
             dfiles = sorted(os.listdir(dpath))
+            flist = []
             for fn in dfiles:
-                files.append(os.path.join(dpath, fn))
-                labels.append(label)
+                flist.append(os.path.join(dpath, fn))
+            files.append(flist)
+            labels.append(label)
         return files, labels
 
     def _read_samples(self, input_queue):
-        file_content = tf.read_file(input_queue[0])
-        label = input_queue[1]
+        file_list = tf.split(input_queue[0], [1, 1, 1, 1, 1, 1])
+        images = []
+        for fn in file_list:
+            file_content = tf.read_file(fn[0][0])
+            image = tf.image.decode_jpeg(file_content, channels=3)
+            image = tf.image.resize_images(image, (299, 299))
+            image = tf.cast(image, tf.float32)
+            images.append(image)
 
-        image = tf.image.decode_jpeg(file_content, channels=3)
-        image = tf.cast(image, tf.float32)
+        label = input_queue[1]
         label = tf.cast(label - 1, tf.int64)
+        image = ops.convert_to_tensor(images, dtypes.float32)
 
         return image, label

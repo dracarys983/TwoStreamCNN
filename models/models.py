@@ -21,10 +21,18 @@ class Hybrid(object):
     def __init__(self):
         self.name = "HybridModel"
 
-    def create_model(self, inputs, num_classes, labels, is_training=True, **unused_params):
-        predictions, aux_loss, loss,
-            aux_vars, train_vars, restore_vars = hybrid.hybrid_model(inputs, labels, num_classes, is_training)
-        output = {'predictions': predictions, 'aux_loss': aux_loss, 'loss': loss,
-                'aux_vars': aux_vars, 'train_vars': train_vars, 'restore_vars': restore_vars}
+    def create_feature_model(self, inputs, is_training=True, **unused_params):
+        feature, restore_vars, tvars = hybrid.get_inception_resnet_feats(inputs, is_training)
+        return feature, restore_vars, tvars
 
-        return output
+    def create_aux_model(self, inputs, is_training=True, **unused_params):
+        outputs, tvars = hybrid.get_temporal_mean_pooled_feats(inputs, is_training)
+        return outputs, tvars
+
+    def create_lstm_model(self, inputs, is_training=True, **unused_params):
+        outputs, tvars = hybrid.get_bn_lstm_feats(inputs, is_training)
+        return outputs, tvars
+
+    def create_logits_model(self, inputs, is_training=True, **unused_params):
+        outputs, tvars = hybrid.get_classifier_logits(inputs, is_training)
+        return outputs, tvars

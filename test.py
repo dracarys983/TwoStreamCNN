@@ -52,7 +52,6 @@ def get_input_evaluation_tensors(reader,
                         num_epochs = 1,
                         shuffle = False)
     image, label = reader._read_samples(input_queue)
-    image = tf.image.resize_images(image, (299, 299))
 
     test_image_loader, test_label_loader = tf.train.batch(
         [image, label],
@@ -77,39 +76,69 @@ def build_graph(reader,
     batch_size: How many examples to process at a time.
     num_readers: How many threads to use for I/O operations.
   """
-
   global_step = tf.Variable(0, trainable=False, name="global_step")
-  model_input, labels_batch = get_input_evaluation_tensors(  # pylint: disable=g-line-too-long
-      reader,
-      batch_size=batch_size,
-      num_readers=num_readers)
-  tf.summary.histogram("model_input", model_input)
+  images_loader, labels_loader = get_input_evaluation_tensors(  # pylint: disable=g-line-too-long
+        reader,
+        batch_size=batch_size,
+        num_readers=num_readers)
+  tf.summary.histogram("model_input", inputs_loader)
+  images_batch = tf.placeholder(tf.float32, (None, 299, 299, 3))
+  labels_batch = tf.placeholder(tf.int64, (None,))
+  # 17 x 17 x 512
+  feature, restore_vars, train_v0 = model.create_feature_model(
+        images_batch)
+  # 17 x 17 x (512 * 3)
+  aux_feat_batch = tf.placeholder(tf.float32, (None, 17, 17, 1536))
+  aux_output, train_v1 = model.create_aux_model(
+        aux_feat_batch)
+  # 17 x 17 x (512 * 2)
+  lstm_feat_batch = tf.placeholder(tf.float32, (None, 17, 17, 1024))
+  lstm_output, train_v2 = model.create_lstm_model(
+        lstm_feat_batch)
+  # (17 * 512) = 8074
+  aux_fc_batch = tf.placeholder(tf.float32, (None, 8074))
+  # (3 * 512) = 1536
+  lstm_fc_batch = tf.placeholder(tf.float32, (None, 1536))
+  logits_aux, train_v3 = model.create_logits_model(
+        aux_fc_batch)
+  logits_lstm, train_v4 = model.create_logits_model(
+        lstm_fc_batch)
 
-  result = model.create_model(model_input,
-                            num_classes=reader.num_classes,
-                            labels=labels_batch,
-                            is_training=False)
-  predictions = result["predictions"]
+  # 60
+  final_logits = tf.placeholder(tf.float32, (None, 60))
+  loss = tf.reduce_mean(tf.nn.sparse_softmax_cross_entropy_with_logits(logits=final_logits,
+            labels=labels_batch))
+
+  predictions = final_logits
+
   tf.summary.histogram("model_activations", predictions)
-  if "loss" in result.keys():
-      label_loss = result["loss"]
-  else:
-      label_loss = label_loss_fn.calculate_loss(predictions, labels_batch)
-  restore_vars = result['restore_vars']
-  train_vars = result['train_vars']
 
   tf.add_to_collection("global_step", global_step)
-  tf.add_to_collection("loss", label_loss)
-  tf.add_to_collection("predictions", predictions)
-  tf.add_to_collection("input_batch", model_input)
-  tf.add_to_collection("labels", tf.cast(labels_batch, tf.int64))
+  tf.add_to_collection("loss", final_loss)
+  tf.add_to_collection("feature", feature)
+  tf.add_to_collection("aux_feat_batch", aux_batch)
+  tf.add_to_collection("aux_output", aux_output)
+  tf.add_to_collection("lstm_feat_batch", aux_batch)
+  tf.add_to_collection("lstm_output", lstm_output)
+  tf.add_to_collection("aux_fc_batch", aux_batch)
+  tf.add_to_collection("logits_aux", logits_aux)
+  tf.add_to_collection("lstm_fc_batch", aux_batch)
+  tf.add_to_collection("logits_lstm", logits_lstm)
+  tf.add_to_collection("final_logits", final_logits)
+  tf.add_to_collection("input_batch", images_batch)
+  tf.add_to_collection("labels", labels_batch)
+  tf.add_to_collection("predictions", final_logits)
+  tf.add_to_collection("images_loader", images_loader)
+  tf.add_to_collection("labels_loader", labels_loader)
   tf.add_to_collection("summary_op", tf.summary.merge_all())
 
   return restore_vars
 
-def evaluation_loop(prediction_batch, label_batch, loss,
-                    summary_op, saver, summary_writer, train_dir,
-                    evl_metrics, last_global_step_val):
+def evaluation_loop(predictions, labels, loss, summary_op,
+              inputs, feature, aux_feat_batch, aux_output, lstm_feat_batch, lstm_output,
+              aux_fc_batch, logits_aux, lstm_fc_batch, logits_lstm, final_logits, inputs_loader,
+              labels_loader, saver, summary_writer, train_dir, evl_metrics, last_global_step_val):
+
   """Run the evaluation loop once.
 
   Args:
@@ -135,7 +164,7 @@ def evaluation_loop(prediction_batch, label_batch, loss,
       # Restores from checkpoint
       saver.restore(sess, latest_checkpoint)
       # Assuming model_checkpoint_path looks something like:
-      # /my-favorite-path/yt8m_train/model.ckpt-0, extract global_step from it.
+      # /my-favorite-path/train_dir/model.ckpt-0, extract global_step from it.
       global_step_val = latest_checkpoint.split("/")[-1].split("-")[-1]
     else:
       logging.info("No checkpoint file found.")
@@ -149,7 +178,7 @@ def evaluation_loop(prediction_batch, label_batch, loss,
     sess.run([tf.local_variables_initializer()])
 
     # Start the queue runners.
-    fetches = [prediction_batch, label_batch, loss, summary_op]
+    fetches = [predictions, labels, loss, summary_op]
     coord = tf.train.Coordinator()
     try:
       threads = []
@@ -165,8 +194,41 @@ def evaluation_loop(prediction_batch, label_batch, loss,
       examples_processed = 0
       while not coord.should_stop():
         batch_start_time = time.time()
+
+        input_batch, label_batch = sess.run([inputs_loader, labels_loader])
+
+        input_batch = np.transpose(input_batch, [1, 0, 2, 3, 4])
+        six_inputs = np.split(input_batch, 6)
+
+        features = []
+        for inp in six_inputs:
+            feat_vec = sess.run(feature, feed_dict={inputs: inp})
+            features.append(feat_vec)
+        feats_for_aux = [np.concat([features[i], features[i+2],
+            features[i+4]], axis=3) for i in range(2)]
+        feats_for_lstm = [np.concat([features[i], features[i+1]],
+            axis=3) for i in range(0, 5, 2)]
+
+        aux_outputs = []
+        for feat in feats_for_aux:
+            out = sess.run(aux_output, feed_dict={aux_feat_batch: feat})
+            aux_outputs.append(out)
+        lstm_outputs = []
+        for feat in feats_for_lstm:
+            out = sess.run(lstm_output, feed_dict={lstm_feat_batch: feat})
+            lstm_outputs.append(out)
+        lstm_fc = np.concat(lstm_outputs, axis=1)
+
+        aux_fc_outputs = []
+        for feat in aux_outputs:
+            out = sess.run(logits_aux, feed_dict={aux_fc_batch: feat})
+            aux_fc_outputs.append(out)
+        lstm_fc_output = sess.run(logits_lstm, feed_dict={lstm_fc_batch: lstm_fc})
+        aux_fc_output = (0.5 * aux_fc_outputs[0]) + (0.5 * aux_fc_outputs[1])
+
+        final_fc_out = (0.7 * lstm_fc_output) + (0.3 * aux_fc_output)
         predictions_val, labels_val, loss_val, summary_val = sess.run(
-            fetches)
+                fetches, feed_dict={final_logits: final_fc_out, labels: label_batch})
         seconds_per_batch = time.time() - batch_start_time
         example_per_second = labels_val.shape[0] / seconds_per_batch
         examples_processed += labels_val.shape[0]
@@ -236,9 +298,22 @@ def evaluate(dataset,
             num_readers=1,
             batch_size=batch_size)
     logging.info("built evaluation graph")
-    prediction_batch = tf.get_collection("predictions")[0]
-    label_batch = tf.get_collection("labels")[0]
     loss = tf.get_collection("loss")[0]
+    predictions = tf.get_collection("predictions")[0]
+    labels = tf.get_collection("labels")[0]
+    inputs = tf.get_collection("input_batch")[0]
+    feature = tf.get_collection("feature")[0]
+    aux_feat_batch = tf.get_collection("aux_feat_batch")[0]
+    aux_output = tf.get_collection("aux_output")[0]
+    lstm_feat_batch = tf.get_collection("lstm_feat_batch")[0]
+    lstm_output = tf.get_collection("lstm_output")[0]
+    aux_fc_batch = tf.get_collection("aux_fc_batch")[0]
+    logits_aux = tf.get_collection("logits_aux")[0]
+    lstm_fc_batch = tf.get_collection("lstm_fc_batch")[0]
+    logits_lstm = tf.get_collection("logits_lstm")[0]
+    final_logits = tf.get_collection("final_logits")[0]
+    inputs_loader = tf.get_collection("images_loader")[0]
+    labels_loader = tf.get_collection("labels_loader")[0]
     summary_op = tf.get_collection("summary_op")[0]
 
     saver = tf.train.Saver(tf.global_variables())
@@ -248,10 +323,11 @@ def evaluate(dataset,
 
     last_global_step_val = -1
     while True:
-      last_global_step_val, h1 = evaluation_loop(prediction_batch,
-                                             label_batch, loss, summary_op,
-                                             saver, summary_writer, train_dir,
-                                             evl_metrics, last_global_step_val)
+      last_global_step_val, h1 = evaluation_loop(predictions, labels, loss, summary_op,
+              inputs, feature, aux_feat_batch, aux_output, lstm_feat_batch, lstm_output,
+              aux_fc_batch, logits_aux, lstm_fc_batch, logits_lstm, final_logits, inputs_loader,
+              labels_loader, saver, summary_writer, train_dir, evl_metrics, last_global_step_val)
+
       if run_once:
         break
     return h1

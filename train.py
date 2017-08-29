@@ -39,7 +39,7 @@ if __name__ == '__main__':
     flags.DEFINE_string("optimizer", "AdamOptimizer", "What optimizer class to use")
     flags.DEFINE_string("split_num", "1", "The train/test split to run the model on")
 
-    flags.DEFINE_integer("batch_size", 36, "Number of examples to process per batch \
+    flags.DEFINE_integer("batch_size", 96, "Number of examples to process per batch \
                             for training")
     flags.DEFINE_integer("num_epochs", 50, "How many passes to make over the dataset \
                             before halting training")
@@ -82,7 +82,6 @@ def get_input_data_tensors(reader,
                             num_epochs = num_epochs,
                             shuffle = True)
         image, label = reader._read_samples(input_queue)
-        image = tf.image.resize_images(image, (299, 299))
 
         train_image_loader, train_label_loader = tf.train.shuffle_batch(
             [image, label],
@@ -107,7 +106,6 @@ def build_graph(reader,
                 num_epochs=None):
 
     global_step = tf.Variable(0, name="global_step", trainable=False)
-    global_step_aux = tf.Variable(0, name="global_step", trainable=False)
 
     learning_rate = tf.train.exponential_decay(
         base_learning_rate,
@@ -118,50 +116,66 @@ def build_graph(reader,
     tf.summary.scalar('learning_rate', learning_rate)
 
     optimizer = optimizer_class(learning_rate)
-    images_batch, labels_batch = (
+    images_loader, labels_loader = (
             get_input_data_tensors(
                     reader,
                     reader.train_split_files[split_num],
                     batch_size=batch_size,
                     num_readers=num_readers,
                     num_epochs=num_epochs))
-    result = model.create_model(
-        images_batch,
-        reader.num_classes,
-        labels_batch)
+    images_batch = tf.placeholder(tf.float32, (None, 299, 299, 3))
+    labels_batch = tf.placeholder(tf.int64, (None,))
+    # 17 x 17 x 512
+    feature, restore_vars, train_v0 = model.create_feature_model(
+        images_batch)
+    # 17 x 17 x (512 * 3)
+    aux_feat_batch = tf.placeholder(tf.float32, (None, 17, 17, 1536))
+    aux_output, train_v1 = model.create_aux_model(
+        aux_feat_batch)
+    # 17 x 17 x (512 * 2)
+    lstm_feat_batch = tf.placeholder(tf.float32, (None, 17, 17, 1024))
+    lstm_output, train_v2 = model.create_lstm_model(
+        lstm_feat_batch)
+    # (17 * 512) = 8074
+    aux_fc_batch = tf.placeholder(tf.float32, (None, 8074))
+    # 512
+    lstm_fc_batch = tf.placeholder(tf.float32, (None, 1536))
+    logits_aux, train_v3 = model.create_logits_model(
+        aux_fc_batch)
+    logits_lstm, train_v4 = model.create_logits_model(
+        lstm_fc_batch)
 
-    predictions = result['predictions']
+    # 60
+    final_logits = tf.placeholder(tf.float32, (None, 60))
+    loss = tf.reduce_mean(tf.nn.sparse_softmax_cross_entropy_with_logits(logits=final_logits,
+            labels=labels_batch))
+
+    predictions = final_logits
     tf.summary.histogram("model_activations", predictions)
-    if "loss" in result.keys():
-        label_loss = result['loss']
-        tf.summary.scalar("loss", label_loss)
-        final_loss = label_loss
-    if "aux_loss" in result.keys():
-        aux_loss = result['aux_loss']
-        tf.summary.scalar("aux_loss", aux_loss)
-    if "reg_loss" in result.keys():
-        reg_loss = result['reg_loss']
-        tf.summary.scalar("reg_loss", reg_loss)
-        final_loss += (reg_loss * regularization_penalty)
-    if "aux_vars" in result.keys():
-        aux_vars = result['aux_vars']
-    if "train_vars" in result.keys():
-        train_vars = result['train_vars']
-    else:
-        train_vars = tf.trainable_variables()
-    restore_vars = result['restore_vars']
+    tf.summary.scalar("loss", loss)
 
-    train_op = optimizer.minimize(final_loss, global_step=global_step, var_list=train_vars)
-    train_op_aux = optimizer.minimize(aux_loss, global_step=global_step_aux, var_list=aux_vars)
+    train_vars = train_v0
+    train_vars.extend(train_v1).extend(train_v2).extend(train_v3).extend(train_v4)
+    train_op = optimizer.minimize(loss, global_step=global_step, var_list=train_vars)
 
     tf.add_to_collection("global_step", global_step)
     tf.add_to_collection("loss", final_loss)
-    tf.add_to_collection("aux_loss", aux_loss)
-    tf.add_to_collection("predictions", predictions)
+    tf.add_to_collection("feature", feature)
+    tf.add_to_collection("aux_feat_batch", aux_batch)
+    tf.add_to_collection("aux_output", aux_output)
+    tf.add_to_collection("lstm_feat_batch", aux_batch)
+    tf.add_to_collection("lstm_output", lstm_output)
+    tf.add_to_collection("aux_fc_batch", aux_batch)
+    tf.add_to_collection("logits_aux", logits_aux)
+    tf.add_to_collection("lstm_fc_batch", aux_batch)
+    tf.add_to_collection("logits_lstm", logits_lstm)
+    tf.add_to_collection("final_logits", final_logits)
     tf.add_to_collection("input_batch", images_batch)
     tf.add_to_collection("labels", labels_batch)
+    tf.add_to_collection("predictions", final_logits)
     tf.add_to_collection("train_op", train_op)
-    tf.add_to_collection("train_op_aux", train_op_aux)
+    tf.add_to_collection("images_loader", images_loader)
+    tf.add_to_collection("labels_loader", labels_loader)
 
     return restore_vars
 
@@ -306,11 +320,22 @@ class Trainer(object):
 
             global_step = tf.get_collection("global_step")[0]
             loss = tf.get_collection("loss")[0]
-            aux_loss = tf.get_collection("aux_loss")[0]
             predictions = tf.get_collection("predictions")[0]
             labels = tf.get_collection("labels")[0]
+            inputs = tf.get_collection("input_batch")[0]
             train_op = tf.get_collection("train_op")[0]
-            train_op_aux = tf.get_collection("train_op_aux")[0]
+            feature = tf.get_collection("feature")[0]
+            aux_feat_batch = tf.get_collection("aux_feat_batch")[0]
+            aux_output = tf.get_collection("aux_output")[0]
+            lstm_feat_batch = tf.get_collection("lstm_feat_batch")[0]
+            lstm_output = tf.get_collection("lstm_output")[0]
+            aux_fc_batch = tf.get_collection("aux_fc_batch")[0]
+            logits_aux = tf.get_collection("logits_aux")[0]
+            lstm_fc_batch = tf.get_collection("lstm_fc_batch")[0]
+            logits_lstm = tf.get_collection("logits_lstm")[0]
+            final_logits = tf.get_collection("final_logits")[0]
+            inputs_loader = tf.get_collection("images_loader")[0]
+            labels_loader = tf.get_collection("labels_loader")[0]
             init_op = tf.group(tf.global_variables_initializer(), tf.local_variables_initializer())
 
         sv = tf.train.Supervisor(
@@ -341,8 +366,41 @@ class Trainer(object):
                 logging.info("%s: Entering training loop.", task_as_string(self.task))
                 while (not sv.should_stop()) and (not self.max_steps_reached):
                     batch_start_time = time.time()
-                    _, _, global_step_val, loss_val, aux_loss_val, predictions_val, labels_val = sess.run(
-                        [train_op, train_op_aux, global_step, loss, aux_loss, predictions, labels])
+                    input_batch, label_batch = sess.run([inputs_loader, labels_loader])
+
+                    input_batch = np.transpose(input_batch, [1, 0, 2, 3, 4])
+                    six_inputs = np.split(input_batch, 6)
+
+                    features = []
+                    for inp in six_inputs:
+                        feat_vec = sess.run(feature, feed_dict={inputs: inp})
+                        features.append(feat_vec)
+                    feats_for_aux = [np.concat([features[i], features[i+2],
+                        features[i+4]], axis=3) for i in range(2)]
+                    feats_for_lstm = [np.concat([features[i], features[i+1]],
+                        axis=3) for i in range(0, 5, 2)]
+
+                    aux_outputs = []
+                    for feat in feats_for_aux:
+                        out = sess.run(aux_output, feed_dict={aux_feat_batch: feat})
+                        aux_outputs.append(out)
+                    lstm_outputs = []
+                    for feat in feats_for_lstm:
+                        out = sess.run(lstm_output, feed_dict={lstm_feat_batch: feat})
+                        lstm_outputs.append(out)
+                    lstm_fc = np.concat(lstm_outputs, axis=1)
+
+                    aux_fc_outputs = []
+                    for feat in aux_outputs:
+                        out = sess.run(logits_aux, feed_dict={aux_fc_batch: feat})
+                        aux_fc_outputs.append(out)
+                    lstm_fc_output = sess.run(logits_lstm, feed_dict={lstm_fc_batch: lstm_fc})
+                    aux_fc_output = (0.5 * aux_fc_outputs[0]) + (0.5 * aux_fc_outputs[1])
+
+                    final_fc_out = (0.7 * lstm_fc_output) + (0.3 * aux_fc_output)
+                    _, global_step_val, predictions_val, labels_val, loss = sess.run([train_op,
+                        global_step, predictions, labels, loss], feed_dict={final_logits: final_fc_out, labels: label_batch})
+
                     seconds_per_batch = time.time() - batch_start_time
                     examples_per_second = labels_val.shape[0] / seconds_per_batch # TODO
 
@@ -358,8 +416,8 @@ class Trainer(object):
                         eval_time = eval_end_time - eval_start_time
 
                         logging.info("training step " + str(global_step_val) + " | Loss: " + ("%.2f" % loss_val) +
-                            " AuxLoss: " + ("%.2f" % aux_loss_val) + " Examples/sec: " + ("%.2f" % examples_per_second) +
-                            " | Hit@1: " + ("%.2f" % hit_at_one) + " Hit@5: " + ("%.2f" % hit_at_five))
+                            " Examples/sec: " + ("%.2f" % examples_per_second) + " | Hit@1: " + ("%.2f" % hit_at_one) +
+                            " Hit@5: " + ("%.2f" % hit_at_five))
 
                         sv.summary_writer.add_summary(
                             utils.MakeSummary("model/Training_Hit@1", hit_at_one),
@@ -372,20 +430,9 @@ class Trainer(object):
                                               examples_per_second), global_step_val)
                         sv.summary_writer.flush()
 
-                        '''
-                        # Export model every x steps
-                        time_to_export = ((self.last_model_export_step == 0) or
-                            (global_step_val - self.last_model_export_step
-                            >= self.export_model_steps))
-
-                        if self.is_master and time_to_export:
-                            self.export_model(global_step_val, sv.saver, sv.save_path, sess)
-                            self.last_model_export_step = global_step_val
-                        '''
-
                     else:
                         logging.info("training step " + str(global_step_val) + " | Loss: " + ("%.2f" % loss_val) +
-                            " AuxLoss: " + ("%.2f" % aux_loss_val) + " Examples/sec: " + ("%.2f" % examples_per_second))
+                            " Examples/sec: " + ("%.2f" % examples_per_second))
 
                     if global_step_val and not (global_step_val % validation_steps):
                         f = open('best_checkpoint_path', 'a+')

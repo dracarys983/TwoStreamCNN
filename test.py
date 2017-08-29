@@ -105,7 +105,7 @@ def build_graph(reader,
   tf.add_to_collection("labels", tf.cast(labels_batch, tf.int64))
   tf.add_to_collection("summary_op", tf.summary.merge_all())
 
-  return train_vars, restore_vars
+  return restore_vars
 
 def evaluation_loop(prediction_batch, label_batch, loss,
                     summary_op, saver, summary_writer, train_dir,
@@ -228,7 +228,7 @@ def evaluate(dataset,
                             [models])()
     label_loss_fn = find_class_by_name(label_loss, [losses])()
 
-    train_vars, restore_vars = \
+    restore_vars = \
         build_graph(
             reader=reader,
             model=model,

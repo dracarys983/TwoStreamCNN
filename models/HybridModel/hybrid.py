@@ -6,6 +6,15 @@ import tensorflow.contrib.rnn as rnn
 from inception_resnet_v2 import *
 from bnlstm import *
 
+def last_relevant(output, length):
+    batch_size = tf.shape(output)[0]
+    max_length = tf.shape(output)[1]
+    out_size = int(output.get_shape()[2])
+    index = tf.range(0, batch_size) * max_length + (length - 1)
+    flat = tf.reshape(output, [-1, out_size])
+    relevant = tf.gather(flat, index)
+    return relevant
+
 def hybrid_model(inputs,
                 labels,
                 num_classes,
@@ -33,7 +42,7 @@ def hybrid_model(inputs,
         cells = []
         for i in range(num_layers):
             cell = BNLSTMCell(num_hidden, training=tf.cast(is_training, tf.bool))
-            cell = rnn.DropoutWrapper(cell, input_keep_prob=0.5, output_keep_prob=0.5)
+            cell = rnn.DropoutWrapper(cell, output_keep_prob=0.5)
             cells.append(cell)
         lstmlayer = rnn.MultiRNNCell(cells)
         features = tf.reshape(features, (36, 8, -1))
@@ -42,11 +51,10 @@ def hybrid_model(inputs,
 
     # Primary Classifier
     with tf.variable_scope('Logits'):
-        features = tf.reshape(output, (36, 8, 8, -1))
-        pooled_features = slim.max_pool2d(features, (8, 1), stride=1, padding='VALID', scope='MaxPool_8x1')
-        pooled_features = slim.flatten(pooled_features)
-        dropout = slim.dropout(pooled_features, 0.5, is_training=is_training, scope='Prelogits_dropout')
-        logits = slim.fully_connected(dropout, num_classes, activation_fn=None, scope='Final_logits')
+        last = last_relevant(output, 8)
+        plogits = slim.fully_connected(last, 256, activation_fn=tf.nn.relu, scope='PreLogits')
+        dropout = slim.dropout(plogits, 0.5, is_training=is_training, scope='Logits_dropout')
+        logits = slim.fully_connected(dropout, num_classes, activation_fn=None, scope='Final_Logits')
 
     # Losses for classification
     aux_loss = tf.reduce_mean(tf.nn.sparse_softmax_cross_entropy_with_logits(labels=labels, logits=aux,
@@ -55,7 +63,10 @@ def hybrid_model(inputs,
                         name='xentropy'), name='xentropy_mean')
     loss = ((0.2 * aux_loss) + (0.8 * logit_loss))
 
-    train_vars = framework.get_variables('AuxLogits')
-    train_vars.extend(framework.get_variables('bnlstm'))
+    aux_vars = framework.get_variables('AuxLogits')
+    train_vars = framework.get_variables('bnlstm')
     train_vars.extend(framework.get_variables('Logits'))
-    return logits, loss, train_vars, restore_vars
+
+    predictions = ((0.5 * aux) + (0.5 * logits))
+
+    return predictions, aux_loss, loss, aux_vars, train_vars, restore_vars

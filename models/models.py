@@ -22,7 +22,9 @@ class Hybrid(object):
         self.name = "HybridModel"
 
     def create_model(self, inputs, num_classes, labels, is_training=True, **unused_params):
-        predictions, loss, train_vars, restore_vars = hybrid.hybrid_model(inputs, labels, num_classes, is_training)
-        output = {'predictions': predictions, 'loss': loss, 'train_vars': train_vars, 'restore_vars': restore_vars}
+        predictions, aux_loss, loss,
+            aux_vars, train_vars, restore_vars = hybrid.hybrid_model(inputs, labels, num_classes, is_training)
+        output = {'predictions': predictions, 'aux_loss': aux_loss, 'loss': loss,
+                'aux_vars': aux_vars, 'train_vars': train_vars, 'restore_vars': restore_vars}
 
         return output

@@ -50,7 +50,7 @@ if __name__ == '__main__':
     flags.DEFINE_integer("learning_rate_decay_examples", 1202730, "Multiply current learning \
                             rate by learning_rate_decay every learning_rate_decay_examples")
 
-    flags.DEFINE_float("base_learning_rate", 0.001, "Which learning rate to start with")
+    flags.DEFINE_float("base_learning_rate", 0.0001, "Which learning rate to start with")
     flags.DEFINE_float("learning_rate_decay", 0.9, "Learning rate decay factor to be \
                             applied every learning_rate_decay_examples")
     flags.DEFINE_float("clip_gradient_norm", 1.0, "Norm to clip gradients to")
@@ -107,6 +107,7 @@ def build_graph(reader,
                 num_epochs=None):
 
     global_step = tf.Variable(0, name="global_step", trainable=False)
+    global_step_aux = tf.Variable(0, name="global_step", trainable=False)
 
     learning_rate = tf.train.exponential_decay(
         base_learning_rate,
@@ -135,10 +136,15 @@ def build_graph(reader,
         label_loss = result['loss']
         tf.summary.scalar("loss", label_loss)
         final_loss = label_loss
+    if "aux_loss" in result.keys():
+        aux_loss = result['aux_loss']
+        tf.summary.scalar("aux_loss", aux_loss)
     if "reg_loss" in result.keys():
         reg_loss = result['reg_loss']
         tf.summary.scalar("reg_loss", reg_loss)
         final_loss += (reg_loss * regularization_penalty)
+    if "aux_vars" in result.keys():
+        aux_vars = result['aux_vars']
     if "train_vars" in result.keys():
         train_vars = result['train_vars']
     else:
@@ -146,15 +152,18 @@ def build_graph(reader,
     restore_vars = result['restore_vars']
 
     train_op = optimizer.minimize(final_loss, global_step=global_step, var_list=train_vars)
+    train_op_aux = optimizer.minimize(aux_loss, global_step=global_step_aux, var_list=aux_vars)
 
     tf.add_to_collection("global_step", global_step)
     tf.add_to_collection("loss", final_loss)
+    tf.add_to_collection("aux_loss", aux_loss)
     tf.add_to_collection("predictions", predictions)
     tf.add_to_collection("input_batch", images_batch)
     tf.add_to_collection("labels", labels_batch)
     tf.add_to_collection("train_op", train_op)
+    tf.add_to_collection("train_op_aux", train_op_aux)
 
-    return train_vars, restore_vars
+    return restore_vars
 
 def find_class_by_name(name, modules):
     modules = [getattr(module, name, None) for module in modules]
@@ -243,7 +252,7 @@ class Trainer(object):
         label_loss_fn = find_class_by_name(FLAGS.label_loss, [losses])()
         optimizer_class = find_class_by_name(FLAGS.optimizer, [tf.train])
 
-        train_vars, restore_vars = \
+        restore_vars = \
             build_graph(reader=reader,
                          model=model,
                          optimizer_class=optimizer_class,
@@ -297,9 +306,11 @@ class Trainer(object):
 
             global_step = tf.get_collection("global_step")[0]
             loss = tf.get_collection("loss")[0]
+            aux_loss = tf.get_collection("aux_loss")[0]
             predictions = tf.get_collection("predictions")[0]
             labels = tf.get_collection("labels")[0]
             train_op = tf.get_collection("train_op")[0]
+            train_op_aux = tf.get_collection("train_op_aux")[0]
             init_op = tf.group(tf.global_variables_initializer(), tf.local_variables_initializer())
 
         sv = tf.train.Supervisor(
@@ -330,8 +341,8 @@ class Trainer(object):
                 logging.info("%s: Entering training loop.", task_as_string(self.task))
                 while (not sv.should_stop()) and (not self.max_steps_reached):
                     batch_start_time = time.time()
-                    _, global_step_val, loss_val, predictions_val, labels_val = sess.run(
-                        [train_op, global_step, loss, predictions, labels])
+                    _, _, global_step_val, loss_val, aux_loss_val, predictions_val, labels_val = sess.run(
+                        [train_op, train_op_aux, global_step, loss, aux_loss, predictions, labels])
                     seconds_per_batch = time.time() - batch_start_time
                     examples_per_second = labels_val.shape[0] / seconds_per_batch # TODO
 
@@ -347,8 +358,8 @@ class Trainer(object):
                         eval_time = eval_end_time - eval_start_time
 
                         logging.info("training step " + str(global_step_val) + " | Loss: " + ("%.2f" % loss_val) +
-                            " Examples/sec: " + ("%.2f" % examples_per_second) + " | Hit@1: " +
-                            ("%.2f" % hit_at_one) + " Hit@5: " + ("%.2f" % hit_at_five))
+                            " AuxLoss: " + ("%.2f" % aux_loss_val) + " Examples/sec: " + ("%.2f" % examples_per_second) +
+                            " | Hit@1: " + ("%.2f" % hit_at_one) + " Hit@5: " + ("%.2f" % hit_at_five))
 
                         sv.summary_writer.add_summary(
                             utils.MakeSummary("model/Training_Hit@1", hit_at_one),
@@ -373,8 +384,8 @@ class Trainer(object):
                         '''
 
                     else:
-                        logging.info("training step " + str(global_step_val) + " | Loss: " +
-                            ("%.2f" % loss_val) + " Examples/sec: " + ("%.2f" % examples_per_second))
+                        logging.info("training step " + str(global_step_val) + " | Loss: " + ("%.2f" % loss_val) +
+                            " AuxLoss: " + ("%.2f" % aux_loss_val) + " Examples/sec: " + ("%.2f" % examples_per_second))
 
                     if global_step_val and not (global_step_val % validation_steps):
                         f = open('best_checkpoint_path', 'a+')

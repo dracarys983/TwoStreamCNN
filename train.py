@@ -359,7 +359,7 @@ class Trainer(object):
                 global_h1 = float(line)
         else:
             global_h1 = -1
-        validation_steps = 37585
+        validation_steps = 5
         logging.info("%s: Starting managed session.", task_as_string(self.task))
         with sv.managed_session(config=self.config) as sess:
             try:

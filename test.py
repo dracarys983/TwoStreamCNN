@@ -1,4 +1,5 @@
 import time
+import numpy as np
 
 import tensorflow as tf
 from tensorflow import app
@@ -81,7 +82,6 @@ def build_graph(reader,
         reader,
         batch_size=batch_size,
         num_readers=num_readers)
-  tf.summary.histogram("model_input", inputs_loader)
   images_batch = tf.placeholder(tf.float32, (None, 299, 299, 3))
   labels_batch = tf.placeholder(tf.int64, (None,))
   # 17 x 17 x 512
@@ -95,23 +95,22 @@ def build_graph(reader,
   lstm_feat_batch = tf.placeholder(tf.float32, (None, 17, 17, 1024))
   lstm_output, train_v2 = model.create_lstm_model(
         lstm_feat_batch, is_training=False)
-  # (17 * 512) = 8074
-  aux_fc_batch = tf.placeholder(tf.float32, (None, 8074))
-  # (3 * 512) = 1536
+  # (3 * 512)
   lstm_fc_batch = tf.placeholder(tf.float32, (None, 1536))
-  logits_aux, train_v3 = model.create_logits_model(
-        aux_fc_batch, 60, scope="auxlogs", is_training=False)
   logits_lstm, train_v4 = model.create_logits_model(
-        lstm_fc_batch, 60, scope="lstmlogs", is_training=False)
+      lstm_fc_batch, 60, scope="lstmlogs", is_training=False)
+  # (17 * 512 * 2) = 17408
+  aux_fc_batch = tf.placeholder(tf.float32, (None, 17408))
+  logits_aux, train_v3 = model.create_logits_model(
+      aux_fc_batch, 60, scope="auxlogs", is_training=False)
 
   # 60
-  final_logits = (0.3 * logits_aux + 0.7 * logits_lstm)
-  loss = tf.reduce_mean(tf.nn.sparse_softmax_cross_entropy_with_logits(logits=final_logits,
-            labels=labels_batch))
+  loss = (0.4 * tf.reduce_mean(
+      tf.nn.sparse_softmax_cross_entropy_with_logits(logits=logits_aux, labels=labels_batch))
+      + 0.6 * tf.reduce_mean(
+          tf.nn.sparse_softmax_cross_entropy_with_logits(logits=logits_lstm, labels=labels_batch)))
 
-  predictions = final_logits
-
-  tf.summary.histogram("model_activations", predictions)
+  predictions = tf.placeholder(tf.float32, (None, 60))
 
   tf.add_to_collection("global_step", global_step)
   tf.add_to_collection("loss", loss)
@@ -124,19 +123,17 @@ def build_graph(reader,
   tf.add_to_collection("logits_aux", logits_aux)
   tf.add_to_collection("lstm_fc_batch", lstm_fc_batch)
   tf.add_to_collection("logits_lstm", logits_lstm)
-  tf.add_to_collection("final_logits", final_logits)
   tf.add_to_collection("input_batch", images_batch)
   tf.add_to_collection("labels", labels_batch)
-  tf.add_to_collection("predictions", final_logits)
+  tf.add_to_collection("predictions", predictions)
   tf.add_to_collection("images_loader", images_loader)
   tf.add_to_collection("labels_loader", labels_loader)
-  tf.add_to_collection("summary_op", tf.summary.merge_all())
 
   return restore_vars
 
-def evaluation_loop(predictions, labels, loss, summary_op,
+def evaluation_loop(predictions, labels, loss,
               inputs, feature, aux_feat_batch, aux_output, lstm_feat_batch, lstm_output,
-              aux_fc_batch, logits_aux, lstm_fc_batch, logits_lstm, final_logits, inputs_loader,
+              aux_fc_batch, logits_aux, lstm_fc_batch, logits_lstm, inputs_loader,
               labels_loader, saver, summary_writer, train_dir, evl_metrics, last_global_step_val):
 
   """Run the evaluation loop once.
@@ -178,7 +175,7 @@ def evaluation_loop(predictions, labels, loss, summary_op,
     sess.run([tf.local_variables_initializer()])
 
     # Start the queue runners.
-    fetches = [predictions, labels, loss, summary_op]
+    fetches = [predictions, labels, loss]
     coord = tf.train.Coordinator()
     try:
       threads = []
@@ -199,14 +196,15 @@ def evaluation_loop(predictions, labels, loss, summary_op,
 
         input_batch = np.transpose(input_batch, [1, 0, 2, 3, 4])
         six_inputs = np.split(input_batch, 6)
+        six_inputs = [np.reshape(x, [-1, 299, 299, 3]) for x in six_inputs]
 
         features = []
         for inp in six_inputs:
             feat_vec = sess.run(feature, feed_dict={inputs: inp})
             features.append(feat_vec)
-        feats_for_aux = [np.concat([features[i], features[i+2],
+        feats_for_aux = [np.concatenate([features[i], features[i+2],
             features[i+4]], axis=3) for i in range(2)]
-        feats_for_lstm = [np.concat([features[i], features[i+1]],
+        feats_for_lstm = [np.concatenate([features[i], features[i+1]],
             axis=3) for i in range(0, 5, 2)]
 
         aux_outputs = []
@@ -217,14 +215,19 @@ def evaluation_loop(predictions, labels, loss, summary_op,
         for feat in feats_for_lstm:
             out = sess.run(lstm_output, feed_dict={lstm_feat_batch: feat})
             lstm_outputs.append(out)
-        lstm_fc = np.concat(lstm_outputs, axis=1)
-        aux_fc = np.concat(aux_fc_outputs, axis=1)
-        aux_fc_output, lstm_fc_output, final_fc_out = sess.run(
-                [logits_aux, logits_lstm, final_logits],
+
+        lstm_fc = np.concatenate(lstm_outputs, axis=1)
+        aux_fc = np.concatenate(aux_outputs, axis=1)
+
+        aux_fc_output, lstm_fc_output = sess.run(
+                [logits_aux, logits_lstm],
                 feed_dict={aux_fc_batch: aux_fc, lstm_fc_batch: lstm_fc})
 
-        predictions_val, labels_val, loss_val, summary_val = sess.run(
-                fetches, feed_dict={labels: label_batch})
+        final_logits = (0.4 * aux_fc_output) + (0.6 * lstm_fc_output)
+
+        predictions_val, labels_val, loss_val  = sess.run(
+                fetches, feed_dict={labels: label_batch,
+                    predictions: final_logits, aux_fc_batch: aux_fc, lstm_fc_batch: lstm_fc})
         seconds_per_batch = time.time() - batch_start_time
         example_per_second = labels_val.shape[0] / seconds_per_batch
         examples_processed += labels_val.shape[0]
@@ -249,7 +252,7 @@ def evaluation_loop(predictions, labels, loss, summary_op,
       epoch_info_dict = evl_metrics.get()
       epoch_info_dict["epoch_id"] = global_step_val
 
-      summary_writer.add_summary(summary_val, global_step_val)
+      #summary_writer.add_summary(summary_val, global_step_val)
       epochinfo = utils.AddEpochSummary(
           summary_writer,
           global_step_val,
@@ -307,10 +310,8 @@ def evaluate(dataset,
     logits_aux = tf.get_collection("logits_aux")[0]
     lstm_fc_batch = tf.get_collection("lstm_fc_batch")[0]
     logits_lstm = tf.get_collection("logits_lstm")[0]
-    final_logits = tf.get_collection("final_logits")[0]
     inputs_loader = tf.get_collection("images_loader")[0]
     labels_loader = tf.get_collection("labels_loader")[0]
-    summary_op = tf.get_collection("summary_op")[0]
 
     saver = tf.train.Saver(tf.global_variables())
     summary_writer = tf.summary.FileWriter(train_dir, graph=tf.get_default_graph())
@@ -319,9 +320,9 @@ def evaluate(dataset,
 
     last_global_step_val = -1
     while True:
-      last_global_step_val, h1 = evaluation_loop(predictions, labels, loss, summary_op,
+      last_global_step_val, h1 = evaluation_loop(predictions, labels, loss,
               inputs, feature, aux_feat_batch, aux_output, lstm_feat_batch, lstm_output,
-              aux_fc_batch, logits_aux, lstm_fc_batch, logits_lstm, final_logits, inputs_loader,
+              aux_fc_batch, logits_aux, lstm_fc_batch, logits_lstm, inputs_loader,
               labels_loader, saver, summary_writer, train_dir, evl_metrics, last_global_step_val)
 
       if run_once:

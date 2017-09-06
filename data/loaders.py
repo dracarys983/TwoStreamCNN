@@ -89,7 +89,7 @@ class HybridModelReader(object):
         for fn in file_list:
             file_content = tf.read_file(fn[0])
             image = tf.image.decode_jpeg(file_content, channels=3)
-            image = tf.image.resize_images(image, (299, 299))
+            image = tf.image.resize_images(image, (224, 224))
             image = tf.cast(image, tf.float32)
             images.append(image)
 

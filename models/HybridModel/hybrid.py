@@ -4,6 +4,7 @@ import tensorflow.contrib.framework as framework
 import tensorflow.contrib.rnn as rnn
 
 from inception_resnet_v2 import *
+from vgg import *
 from bnlstm import *
 
 def length(sequence):
@@ -41,19 +42,19 @@ def last_relevant(output, length):
 
 def get_inception_resnet_feats(inputs, is_training=True):
     # Inception Resnet V2 for feature extraction
-    scope = inception_resnet_v2_arg_scope()
+    scope = vgg_arg_scope()
     with slim.arg_scope(scope):
-        _, end_points = inception_resnet_v2(inputs)
-        features = end_points['PreAuxLogits']          # 17 x 17 x 1088
+        _, end_points = vgg_16(inputs)
+        features = end_points['vgg_16/conv5/conv5_1']           # 14 x 14 x 512
         restore_vars = framework.get_variables_to_restore(
-                exclude=['global_step', 'InceptionResnetV2/Logits', 'InceptionResnetV2/AuxLogits'])
+                exclude=['global_step', 'vgg_16/fc8'])
 
-    scope = common_arg_scope()
-    with slim.arg_scope(scope):
+    #scope = common_arg_scope()
+    #with slim.arg_scope(scope):
         # Reduce Dimensionality
-        with tf.variable_scope('DimReduce'):
-            features = slim.conv2d(features, 512, 1, scope='Conv2d_1x1')
-    tvars = framework.get_variables('DimReduce')
+    #    with tf.variable_scope('DimReduce'):
+    #        features = slim.conv2d(features, 512, 1, scope='Conv2d_1x1')
+    tvars = []
 
     return features, restore_vars, tvars
 
@@ -61,7 +62,7 @@ def get_temporal_mean_pooled_feats(inputs, is_training=True):
     # Temporal Average pooling
     with tf.variable_scope('temporal_mean_pool'):
         features = slim.conv2d(inputs, 512, 1, scope='Conv2d_1x1')
-        pooled_features = slim.avg_pool2d(features, (17, 1), stride=1, padding='VALID', scope='MaxPool_17x1')
+        pooled_features = slim.avg_pool2d(features, (14, 1), stride=1, padding='VALID', scope='AvgPool_14x1')
         features = slim.flatten(pooled_features)
     tvars = framework.get_variables('temporal_mean_pool')
 

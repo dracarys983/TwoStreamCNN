@@ -1,4 +1,4 @@
 #!/bin/bash
 
-python train.py --train_dir=/Pulsar2/mohit.jain/kalpit_data/nturgbd_hybrid --dataset_dir=/Pulsar2/mohit.jain/kalpit_data/nturgb+d_images \
-    --splits_dir=/users/kalpit.t/NTU_data --split_num 1 --checkpoint_file=/Pulsar2/mohit.jain/kalpit_data/inception_resnet_v2.ckpt
+python train.py --train_dir=/home/procastinator/nturgbd_hybrid_cnnonly --dataset_dir=/home/procastinator/nturgb+d_images \
+    --splits_dir=/home/procastinator/NTU_data --split_num 2 --checkpoint_file=/home/procastinator/ActRec-2D/models/VGG/vgg_16.ckpt

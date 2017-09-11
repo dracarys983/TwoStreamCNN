@@ -40,20 +40,15 @@ def last_relevant(output, length):
     relevant = tf.gather(flat, index)
     return relevant
 
-def get_inception_resnet_feats(inputs, is_training=True):
-    # Inception Resnet V2 for feature extraction
+def get_pretrained_model_feats(inputs, is_training=True):
+    # VGG 19 for feature extraction
     scope = vgg_arg_scope()
     with slim.arg_scope(scope):
-        _, end_points = vgg_16(inputs)
-        features = end_points['vgg_16/conv5/conv5_1']           # 14 x 14 x 512
+        _, end_points = vgg_19(inputs)
+        features = end_points['vgg_19/conv5/conv5_1']           # 14 x 14 x 512
         restore_vars = framework.get_variables_to_restore(
-                exclude=['global_step', 'vgg_16/fc8'])
+                exclude=['global_step'])
 
-    #scope = common_arg_scope()
-    #with slim.arg_scope(scope):
-        # Reduce Dimensionality
-    #    with tf.variable_scope('DimReduce'):
-    #        features = slim.conv2d(features, 512, 1, scope='Conv2d_1x1')
     tvars = []
 
     return features, restore_vars, tvars
@@ -61,41 +56,17 @@ def get_inception_resnet_feats(inputs, is_training=True):
 def get_temporal_mean_pooled_feats(inputs, is_training=True):
     # Temporal Average pooling
     with tf.variable_scope('temporal_mean_pool'):
-        features = slim.conv2d(inputs, 512, 1, scope='Conv2d_1x1')
-        pooled_features = slim.avg_pool2d(features, (14, 1), stride=1, padding='VALID', scope='AvgPool_14x1')
+        pooled_features = slim.avg_pool2d(inputs, (8, 1), stride=1, padding='VALID', scope='AvgPool_8x1')
         features = slim.flatten(pooled_features)
     tvars = framework.get_variables('temporal_mean_pool')
 
     return features, tvars
 
-def get_bn_lstm_feats(inputs, is_training=True):
-    # 2-layer Batch-Normalized LSTM
-    with tf.variable_scope('bnlstm'):
-        # Reduce feature dimension
-        features = slim.conv2d(inputs, 512, 1, scope='Conv2d_1x1')
-        num_hidden = 512; num_layers = 2
-        cells = []
-        for i in range(num_layers):
-            cell = BNLSTMCell(num_hidden, training=tf.cast(is_training, tf.bool))
-            cell = rnn.DropoutWrapper(cell, output_keep_prob=0.5)
-            cells.append(cell)
-        lstmlayer = rnn.MultiRNNCell(cells)
-        b = tf.shape(features)[0]
-        l = features.get_shape().as_list()[2:]
-        l = l[0] * l[1]
-        features = tf.reshape(features, shape=(b, 17, l))
-        output, _ = tf.nn.dynamic_rnn(lstmlayer, features,
-                dtype=tf.float32, sequence_length=length(features))
-        last = last_relevant(output, 17)
-
-    tvars = framework.get_variables('bnlstm')
-    return last, tvars
-
-def get_classifier_logits(inputs, num_classes, lscope='', is_training=True):
+def get_classifier_logits(inputs, num_classes, is_training=True, lscope='', reuse=None):
     # Primary Classifier
     scope = common_arg_scope()
     with slim.arg_scope(scope):
-        with tf.variable_scope(lscope):
+        with tf.variable_scope(lscope, reuse=reuse):
             plogits = slim.fully_connected(inputs, 1024, activation_fn=tf.nn.relu, scope='PreLogits')
             dropout = slim.dropout(plogits, 0.5, is_training=is_training, scope='Logits_dropout')
             logits = slim.fully_connected(dropout, num_classes, activation_fn=None, scope='Final_Logits')

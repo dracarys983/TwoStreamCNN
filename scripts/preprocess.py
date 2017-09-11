@@ -249,6 +249,271 @@ def _write_to_images(task,
                 logging.info("%s: status: %d of %d done", task_as_string(task), n, l)
     return n, two_person
 
+def _write_to_images_new(task,
+                    reader,
+                    split,
+                    outdir='',
+                    train=True):
+    if train:
+        fpath = reader.train_splits[split]
+        splitname = "train"
+    else:
+        fpath = reader.test_splits[split]
+        splitname = "test"
+    logging.info("%s: Converting %s split%d files to TFRecords", task_as_string(task), splitname, split)
+
+    with open(os.path.join(reader.splits, 'faulty_skeletons'), 'r') as f:
+        remove = f.readlines()
+        remove = [x.strip() for x in remove]
+
+    with open(fpath, 'r') as f:
+        lines = f.readlines()
+        files = [x.strip().split()[0] for x in lines]
+        labels = [int(x.strip().split()[1]) for x in lines]
+        n = 0; l = len(files); two_person = 0
+        for fname, label in zip(files, labels):
+            if not any(fname.split('.')[0] in x for x in remove):
+                n += 1
+                if not os.path.exists(outdir):
+                    os.makedirs(outdir)
+                    os.makedirs(os.path.join(outdir, splitname + str(split)))
+                elif not os.path.exists(os.path.join(outdir, splitname + str(split))):
+                    os.makedirs(os.path.join(outdir, splitname + str(split)))
+
+                image_dir = os.path.join(outdir, splitname + str(split), fname)
+                if not os.path.exists(image_dir):
+                    os.makedirs(image_dir)
+                else:
+                    if len(os.listdir(image_dir)) == 6:
+                        continue
+                video = reader._read_skeleton_file(fname)
+                skeletons_0, skeletons_1 = video._get_main_actor_skeletons()
+
+                two_person_action = True
+                for i in skeletons_1:
+                    if i._is_zero_skeleton:
+                        two_person_action = False
+
+                L = len(skeletons_0)
+                if two_person_action:
+                    im_size = (2, L * 3, 48 * 3)
+                    im_size_d = (2, (L-1) * 3, 48 * 3)
+                else:
+                    im_size = (2, L * 3, 24 * 3)
+                    im_size_d = (2, (L-1) * 3, 24 * 3)
+
+                im_r = np.zeros(im_size); im_theta = np.zeros(im_size); im_phi = np.zeros(im_size)
+                im_r_d = np.zeros(im_size_d); im_theta_d = np.zeros(im_size_d); im_phi_d = np.zeros(im_size_d)
+                for nn, skeleton in enumerate(skeletons_0):
+                    joints = skeleton._get_joint_objects()
+                    assert len(joints) == 25
+                    im_num = 0
+                    for i in [0, 20]:
+                        feat_len = 0
+                        joint = joints[i]
+                        x, y, z = joint._get_cartesian_coordinates()
+                        for j in range(len(joints)):
+                            if not j == i:
+                                joint_ = joints[j]
+                                x_, y_, z_ = joint_._get_cartesian_coordinates()
+                                r = np.full((3,3), (x - x_))
+                                theta = np.full((3,3), (y - y_))
+                                phi = np.full((3,3), (z - z_))
+                                im_r[im_num, nn*3:(nn+1)*3, feat_len*3:(feat_len+1)*3] = r
+                                im_theta[im_num, nn*3:(nn+1)*3, feat_len*3:(feat_len+1)*3] = theta
+                                im_phi[im_num, nn*3:(nn+1)*3, feat_len*3:(feat_len+1)*3] = phi
+                                feat_len += 1
+                        im_num += 1
+                if two_person_action:
+                    processed = 24
+                    two_person += 1
+                    for nn, skeleton in enumerate(skeletons_0):
+                        joints_0 = skeleton._get_joint_objects()
+                        joints_1 = skeletons_1[nn]._get_joint_objects()
+                        assert len(joints_0) == 25; assert len(joints_1) == 25
+                        im_num = 0
+                        for i in [0, 20]:
+                            feat_len = processed
+                            joint = joints_0[i]
+                            x, y, z = joint._get_cartesian_coordinates()
+                            for j in range(len(joints_1)):
+                                if not j == i:
+                                    joint_ = joints_1[j]
+                                    x_, y_, z_ = joint_._get_cartesian_coordinates()
+                                    r = np.full((3,3), (x - x_))
+                                    theta = np.full((3,3), (y - y_))
+                                    phi = np.full((3,3), (z - z_))
+                                    im_r[im_num, nn*3:(nn+1)*3, feat_len*3:(feat_len+1)*3] = r
+                                    im_theta[im_num, nn*3:(nn+1)*3, feat_len*3:(feat_len+1)*3] = theta
+                                    im_phi[im_num, nn*3:(nn+1)*3, feat_len*3:(feat_len+1)*3] = phi
+                                    feat_len += 1
+                            im_num += 1
+                for i in range(2):
+                    im1 = im_r[i]
+                    im2 = im_theta[i]
+                    im3 = im_phi[i]
+                    for nn in range(1, len(im1)/3):
+                        f1 = im1[(nn-1)*3:nn*3]; f2 = im1[nn*3:(nn+1)*3]
+                        im_r_d[i, (nn-1)*3:nn*3] = (f1 - f2)
+                        f1 = im2[(nn-1)*3:nn*3]; f2 = im2[nn*3:(nn+1)*3]
+                        im_theta_d[i, (nn-1)*3:nn*3] = (f1 - f2)
+                        f1 = im3[(nn-1)*3:nn*3]; f2 = im3[nn*3:(nn+1)*3]
+                        im_phi_d[i, (nn-1)*3:nn*3] = (f1 - f2)
+
+                count = 0
+                for im in im_r:
+                    im += np.amin(im)
+                    im *= 255.0 / np.amax(im)
+                    image = Image.fromarray(im.astype(np.uint8), 'L')
+                    path = os.path.join(image_dir, 'img_%.4d.jpg' % count)
+                    image.save(path)
+                    count += 1
+                for im in im_theta:
+                    im += np.amin(im)
+                    im *= 255.0 / np.amax(im)
+                    image = Image.fromarray(im.astype(np.uint8), 'L')
+                    path = os.path.join(image_dir, 'img_%.4d.jpg' % count)
+                    image.save(path)
+                    count += 1
+                for im in im_phi:
+                    im += np.amin(im)
+                    im *= 255.0 / np.amax(im)
+                    image = Image.fromarray(im.astype(np.uint8), 'L')
+                    path = os.path.join(image_dir, 'img_%.4d.jpg' % count)
+                    image.save(path)
+                    count += 1
+                for im in im_r_d:
+                    im += np.amin(im)
+                    im *= 255.0 / np.amax(im)
+                    image = Image.fromarray(im.astype(np.uint8), 'L')
+                    path = os.path.join(image_dir, 'img_%.4d.jpg' % count)
+                    image.save(path)
+                    count += 1
+                for im in im_theta_d:
+                    im += np.amin(im)
+                    im *= 255.0 / np.amax(im)
+                    image = Image.fromarray(im.astype(np.uint8), 'L')
+                    path = os.path.join(image_dir, 'img_%.4d.jpg' % count)
+                    image.save(path)
+                    count += 1
+                for im in im_phi_d:
+                    im += np.amin(im)
+                    im *= 255.0 / np.amax(im)
+                    image = Image.fromarray(im.astype(np.uint8), 'L')
+                    path = os.path.join(image_dir, 'img_%.4d.jpg' % count)
+                    image.save(path)
+                    count += 1
+                logging.info("%s: status: %d of %d done", task_as_string(task), n, l)
+    return n, two_person
+
+def _write_to_frames(task,
+                    reader,
+                    split,
+                    outdir='',
+                    train=True):
+    if train:
+        fpath = reader.train_splits[split]
+        splitname = "train"
+    else:
+        fpath = reader.test_splits[split]
+        splitname = "test"
+    logging.info("%s: Converting %s split%d files to TFRecords", task_as_string(task), splitname, split)
+
+    with open(os.path.join(reader.splits, 'faulty_skeletons'), 'r') as f:
+        remove = f.readlines()
+        remove = [x.strip() for x in remove]
+
+    with open(fpath, 'r') as f:
+        lines = f.readlines()
+        files = [x.strip().split()[0] for x in lines]
+        labels = [int(x.strip().split()[1]) for x in lines]
+        n = 0; l = len(files); two_person = 0
+        for fname, label in zip(files, labels):
+            if not any(fname.split('.')[0] in x for x in remove):
+                n += 1
+                if not os.path.exists(outdir):
+                    os.makedirs(outdir)
+                    os.makedirs(os.path.join(outdir, splitname + str(split)))
+                elif not os.path.exists(os.path.join(outdir, splitname + str(split))):
+                    os.makedirs(os.path.join(outdir, splitname + str(split)))
+
+                image_dir = os.path.join(outdir, splitname + str(split), fname)
+                if not os.path.exists(image_dir):
+                    os.makedirs(image_dir)
+                else:
+                    if len(os.listdir(image_dir)) == 6:
+                        continue
+                video = reader._read_skeleton_file(fname)
+                skeletons_0, skeletons_1 = video._get_main_actor_skeletons()
+
+                two_person_action = True
+                for i in skeletons_1:
+                    if i._is_zero_skeleton:
+                        two_person_action = False
+
+                if two_person_action:
+                    im_size = (len(skeletons_0), 25, 48, 3)
+                else:
+                    im_size = (len(skeletons_0), 25, 24, 3)
+
+                im = np.zeros(im_size)
+                im_num = 0
+                for nn, skeleton in enumerate(skeletons_0):
+                    joints = skeleton._get_joint_objects()
+                    assert len(joints) == 25
+                    for i in range(len(joints)):
+                        feat_len = 0
+                        joint = joints[i]
+                        x, y, z = joint._get_cartesian_coordinates()
+                        for j in range(len(joints)):
+                            if not j == i:
+                                joint_ = joints[j]
+                                x_, y_, z_ = joint_._get_cartesian_coordinates()
+                                r = x - x_; theta = y - y_; phi = z - z_
+                                j = Joint(r, theta, phi)
+                                r, theta, phi = j._get_spherical_coordinates()
+                                im[im_num, i, feat_len, 0] = r
+                                im[im_num, i, feat_len, 1] = theta
+                                im[im_num, i, feat_len, 2] = phi
+                                feat_len += 1
+                    im_num += 1
+                if two_person_action:
+                    processed = 24
+                    two_person += 1
+                    im_num = 0
+                    for nn, skeleton in enumerate(skeletons_0):
+                        joints_0 = skeleton._get_joint_objects()
+                        joints_1 = skeletons_1[nn]._get_joint_objects()
+                        assert len(joints_0) == 25; assert len(joints_1) == 25
+                        for i in range(len(joints)):
+                            if not j == i:
+                                feat_len = processed
+                                joint = joints_0[i]
+                                x, y, z = joint._get_cartesian_coordinates()
+                                for j in range(len(joints_1)):
+                                    if not j == i:
+                                        joint_ = joints_1[j]
+                                        x_, y_, z_ = joint_._get_cartesian_coordinates()
+                                        r = x - x_; theta = y - y_; phi = z - z_
+                                        j = Joint(r, theta, phi)
+                                        r, theta, phi = j._get_spherical_coordinates()
+                                        im[im_num, i, processed+feat_len, 0] = r
+                                        im[im_num, i, processed+feat_len, 1] = theta
+                                        im[im_num, i, processed+feat_len, 2] = phi
+                                        feat_len += 1
+                        im_num += 1
+                count = 0
+                for img in im:
+                    img += np.amin(img)
+                    img *= 255.0 / np.amax(img)
+                    image = Image.fromarray(img.astype(np.uint8), 'RGB')
+                    path = os.path.join(image_dir, 'img_%.4d.jpg' % count)
+                    image.save(path)
+                    count += 1
+                logging.info("%s: status: %d of %d done", task_as_string(task), n, l)
+            break
+    return n, two_person
+
 def main(unused_argv):
     task_data = {"type": "master", "index": 0}
     task = type("TaskSpec", (object,), task_data)
@@ -290,7 +555,7 @@ def main(unused_argv):
                             outdir=FLAGS.output_dir,
                             train=FLAGS.is_training)
     else:
-        n, two_person = _write_to_images(task,
+        n, two_person = _write_to_images_new(task,
                             reader=reader,
                             split=FLAGS.split_num,
                             outdir=FLAGS.output_dir,

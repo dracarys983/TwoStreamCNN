@@ -40,14 +40,14 @@ def last_relevant(output, length):
     relevant = tf.gather(flat, index)
     return relevant
 
-def get_pretrained_model_feats(inputs, is_training=True):
+def get_pretrained_model_feats(inputs, scopename='', is_training=True):
     # VGG 19 for feature extraction
     scope = vgg_arg_scope()
     with slim.arg_scope(scope):
-        _, end_points = vgg_19(inputs)
-        features = end_points['vgg_19/conv5/conv5_1']           # 14 x 14 x 512
-        restore_vars = framework.get_variables_to_restore(
-                exclude=['global_step'])
+        with tf.variable_scope(scopename):
+            _, end_points = vgg_19(inputs)
+            features = end_points[scopename+'/vgg_19/conv5/conv5_1']           # 14 x 14 x 512
+            restore_vars = framework.get_variables(scopename)
 
     tvars = []
 
@@ -56,7 +56,7 @@ def get_pretrained_model_feats(inputs, is_training=True):
 def get_temporal_mean_pooled_feats(inputs, is_training=True):
     # Temporal Average pooling
     with tf.variable_scope('temporal_mean_pool'):
-        pooled_features = slim.avg_pool2d(inputs, (8, 1), stride=1, padding='VALID', scope='AvgPool_8x1')
+        pooled_features = slim.avg_pool2d(inputs, (14, 1), stride=1, padding='VALID', scope='AvgPool_8x1')
         features = slim.flatten(pooled_features)
     tvars = framework.get_variables('temporal_mean_pool')
 
@@ -67,8 +67,8 @@ def get_classifier_logits(inputs, num_classes, is_training=True, lscope='', reus
     scope = common_arg_scope()
     with slim.arg_scope(scope):
         with tf.variable_scope(lscope, reuse=reuse):
-            plogits = slim.fully_connected(inputs, 1024, activation_fn=tf.nn.relu, scope='PreLogits')
-            dropout = slim.dropout(plogits, 0.5, is_training=is_training, scope='Logits_dropout')
+            plogits = slim.fully_connected(inputs, 2048, activation_fn=tf.nn.relu, scope='PreLogits')
+            dropout = slim.dropout(plogits, 0.8, is_training=is_training, scope='Logits_dropout')
             logits = slim.fully_connected(dropout, num_classes, activation_fn=None, scope='Final_Logits')
 
     tvars = framework.get_variables(lscope)

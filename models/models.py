@@ -21,8 +21,8 @@ class Hybrid(object):
     def __init__(self):
         self.name = "HybridModel"
 
-    def create_feature_model(self, inputs, is_training=True, **unused_params):
-        feature, restore_vars, tvars = hybrid.get_pretrained_model_feats(inputs, is_training)
+    def create_feature_model(self, inputs, scope='', is_training=True, **unused_params):
+        feature, restore_vars, tvars = hybrid.get_pretrained_model_feats(inputs, scope, is_training)
         return feature, restore_vars, tvars
 
     def create_aux_model(self, inputs, is_training=True, **unused_params):

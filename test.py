@@ -86,10 +86,10 @@ def build_graph(reader,
   labels_batch = tf.placeholder(tf.int64, (None,))
   # (224, 224, 3) -> (14, 14, 512)
   feature_0, restore_vars_0, train_v0 = model.create_feature_model(
-        images_batch, is_training=False)
+        images_batch, scope="rgb", is_training=False)
   # (224, 224, 3) -> (14, 14, 512)
   feature_1, restore_vars_1, train_v1 = model.create_feature_model(
-        images_batch, is_training=False)
+        images_batch, scope="rgbdiff", is_training=False)
   # (14, 14, 512) -> (7168,)
   aux_feat_batch = tf.placeholder(tf.float32, (None, 14, 14, 512))
   aux_output, train_v2 = model.create_aux_model(
@@ -113,13 +113,16 @@ def build_graph(reader,
 
   loss_0 = tf.reduce_mean(tf.nn.sparse_softmax_cross_entropy_with_logits(logits=logits_aux_0, labels=labels_batch))
   loss_1 = tf.reduce_mean(tf.nn.sparse_softmax_cross_entropy_with_logits(logits=logits_aux_1, labels=labels_batch))
+  loss_2 = tf.reduce_mean(tf.nn.sparse_softmax_cross_entropy_with_logits(logits=logits_aux_2, labels=labels_batch))
+  loss_3 = tf.reduce_mean(tf.nn.sparse_softmax_cross_entropy_with_logits(logits=logits_aux_3, labels=labels_batch))
 
-  loss = loss_0 + loss_1 + loss_3 + loss_4
+  loss = loss_0 + loss_1 + loss_2 + loss_3
   predictions = ( logits_aux_0 + logits_aux_1 + logits_aux_2 + logits_aux_3 )
 
   tf.add_to_collection("global_step", global_step)
   tf.add_to_collection("loss", loss)
-  tf.add_to_collection("feature", feature)
+  tf.add_to_collection("feature_0", feature_0)
+  tf.add_to_collection("feature_1", feature_1)
   tf.add_to_collection("aux_feat_batch", aux_feat_batch)
   tf.add_to_collection("aux_output", aux_output)
   tf.add_to_collection("aux_fc_batch_0", aux_fc_batch_0)
@@ -139,9 +142,9 @@ def build_graph(reader,
   return restore_vars_0.extend(restore_vars_1)
 
 def evaluation_loop(predictions, labels, loss,
-              inputs, feature, aux_feat_batch, aux_output, aux_fc_batch_0, logits_aux_0,
+              inputs, aux_feat_batch, aux_output, aux_fc_batch_0, logits_aux_0,
               aux_fc_batch_1, logits_aux_1, aux_fc_batch_2, logits_aux_2,
-              aux_fc_batch_3, logits_aux_3, inputs_loader,
+              aux_fc_batch_3, logits_aux_3, inputs_loader, feature_0, feature_1,
               labels_loader, saver, summary_writer, train_dir, evl_metrics, last_global_step_val):
 
   """Run the evaluation loop once.
@@ -208,7 +211,7 @@ def evaluation_loop(predictions, labels, loss,
 
         # list of (batch_size, 224,  224, 3) of size 6
         tw_inputs = np.split(input_batch, 12)
-        tw_inputs = [np.reshape(x, [-1, 224, 224, 3]) for x in six_inputs]
+        tw_inputs = [np.reshape(x, [-1, 224, 224, 3]) for x in tw_inputs]
         s0_inputs = tw_inputs[:6]
         s1_inputs = tw_inputs[6:]
 
@@ -321,7 +324,8 @@ def evaluate(dataset,
     predictions = tf.get_collection("predictions")[0]
     labels = tf.get_collection("labels")[0]
     inputs = tf.get_collection("input_batch")[0]
-    feature = tf.get_collection("feature")[0]
+    feature_0 = tf.get_collection("feature_0")[0]
+    feature_1 = tf.get_collection("feature_1")[0]
     aux_feat_batch = tf.get_collection("aux_feat_batch")[0]
     aux_output = tf.get_collection("aux_output")[0]
     aux_fc_batch_0 = tf.get_collection("aux_fc_batch_0")[0]
@@ -343,9 +347,9 @@ def evaluate(dataset,
     last_global_step_val = -1
     while True:
       last_global_step_val, h1 = evaluation_loop(predictions, labels, loss,
-              inputs, feature, aux_feat_batch, aux_output, aux_fc_batch_0, logits_aux_0,
+              inputs, aux_feat_batch, aux_output, aux_fc_batch_0, logits_aux_0,
               aux_fc_batch_1, logits_aux_1, aux_fc_batch_2, logits_aux_2,
-              aux_fc_batch_3, logits_aux_3, inputs_loader,
+              aux_fc_batch_3, logits_aux_3, inputs_loader, feature_0, feature_1,
               labels_loader, saver, summary_writer, train_dir, evl_metrics, last_global_step_val)
 
       if run_once:

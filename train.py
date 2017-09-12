@@ -36,10 +36,10 @@ if __name__ == '__main__':
     flags.DEFINE_string("model", "Hybrid", "Which architecture to use for the model")
     flags.DEFINE_string("label_loss", "CrossEntropyLoss", "Which loss function to use \
                             for training the model")
-    flags.DEFINE_string("optimizer", "GradientDescentOptimizer", "What optimizer class to use")
+    flags.DEFINE_string("optimizer", "AdamOptimizer", "What optimizer class to use")
     flags.DEFINE_string("split_num", "1", "The train/test split to run the model on")
 
-    flags.DEFINE_integer("batch_size", 64, "Number of examples to process per batch \
+    flags.DEFINE_integer("batch_size", 24, "Number of examples to process per batch \
                             for training")
     flags.DEFINE_integer("num_epochs", 50, "How many passes to make over the dataset \
                             before halting training")
@@ -47,10 +47,10 @@ if __name__ == '__main__':
                             with which the model is exported for batch prediction")
     flags.DEFINE_integer("max_steps", None, "The maximum number of iterations of the \
                             training loop")
-    flags.DEFINE_integer("learning_rate_decay_examples", 188895, "Multiply current learning \
+    flags.DEFINE_integer("learning_rate_decay_examples", 10000000, "Multiply current learning \
                             rate by learning_rate_decay every learning_rate_decay_examples")
 
-    flags.DEFINE_float("base_learning_rate", 0.001, "Which learning rate to start with")
+    flags.DEFINE_float("base_learning_rate", 0.01, "Which learning rate to start with")
     flags.DEFINE_float("learning_rate_decay", 0.95, "Learning rate decay factor to be \
                             applied every learning_rate_decay_examples")
     flags.DEFINE_float("clip_gradient_norm", 1.0, "Norm to clip gradients to")
@@ -127,9 +127,9 @@ def build_graph(reader,
     labels_batch = tf.placeholder(tf.int64, (None,))
     # (224, 224, 3) -> (14, 14, 512)
     feature_0, restore_vars_0, train_v0 = model.create_feature_model(
-        images_batch)
+        images_batch, scope="rgb")
     feature_1, restore_vars_1, train_v1 = model.create_feature_model(
-        images_batch)
+        images_batch, scope="rgbdiff")
     # (14, 14, 512) -> (7168,)
     aux_feat_batch = tf.placeholder(tf.float32, (None, 14, 14, 512))
     aux_output, train_v2 = model.create_aux_model(
@@ -189,7 +189,11 @@ def build_graph(reader,
     tf.add_to_collection("images_loader", images_loader)
     tf.add_to_collection("labels_loader", labels_loader)
 
-    return restore_vars_0.extend(restore_vars_1)
+    restore_vars_0_dict = {v.name[4:][:-2]: v
+            for v in restore_vars_0}
+    restore_vars_1_dict = {v.name[8:][:-2]: v
+            for v in restore_vars_1}
+    return restore_vars_0_dict, restore_vars_1_dict
 
 def find_class_by_name(name, modules):
     modules = [getattr(module, name, None) for module in modules]
@@ -292,9 +296,10 @@ class Trainer(object):
                          batch_size=FLAGS.batch_size,
                          num_epochs=FLAGS.num_epochs)
 
-        saver = tf.train.Saver(var_list=restore_vars)
+        saver_0 = tf.train.Saver(var_list=restore_vars[0])
+        saver_1 = tf.train.Saver(var_list=restore_vars[1])
 
-        return saver, tf.train.Saver(max_to_keep=2)
+        return saver_0, saver_1, tf.train.Saver(max_to_keep=2)
 
     def run(self, start_new_model=0):
         if self.is_master and start_new_model:
@@ -310,7 +315,7 @@ class Trainer(object):
 
             with tf.device(device_fn):
                 if not meta_filename:
-                    saver_for_restore, saver = self.build_model(self.model, self.reader)
+                    saver_0, saver_1, saver = self.build_model(self.model, self.reader)
 
             global_step = tf.get_collection("global_step")[0]
             loss = tf.get_collection("loss")[0]
@@ -349,7 +354,8 @@ class Trainer(object):
 
         with tf.Session(graph=graph) as sess:
             if not meta_filename:
-                saver_for_restore.restore(sess, FLAGS.checkpoint_file)
+                saver_0.restore(sess, FLAGS.checkpoint_file)
+                saver_1.restore(sess, FLAGS.checkpoint_file)
 
         pp = os.path.join(FLAGS.train_dir, 'best_checkpoint_path')
         if os.path.exists(pp):
